@@ -90,7 +90,7 @@
                       "symbol": "commitment"
                     },
                     "val": {
-                      "bytes": "66d6ca2b0096160993f6ffc7d93ef2d0ef617a0b5c2b6501ac55ff4891ee78be"
+                      "bytes": "4bfeb02fbbea3d48419f9f5841fb6e36b3bf1c16c34e4b54b705f9caef5a1d69"
                     }
                   },
                   {
@@ -98,7 +98,7 @@
                       "symbol": "epoch"
                     },
                     "val": {
-                      "u64": "1235"
+                      "u64": "1234"
                     }
                   },
                   {

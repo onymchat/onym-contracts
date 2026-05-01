@@ -5,18 +5,38 @@ extern crate std;
 use super::*;
 use soroban_sdk::testutils::Address as _;
 
-const PROOF_D5: &[u8; 1601] =
-    include_bytes!("../../verifier/tests/fixtures/proof-d5.bin");
-const PROOF_D8: &[u8; 1601] =
-    include_bytes!("../../verifier/tests/fixtures/proof-d8.bin");
-const PROOF_D11: &[u8; 1601] =
-    include_bytes!("../../verifier/tests/fixtures/proof-d11.bin");
+// Membership uses the democracy-specific VK + 3-level chain (issue #5).
+// The standard `proof-d{N}.bin` / `pi-d{N}.bin` fixtures from the
+// anarchy-shape membership circuit no longer verify against the new
+// `democracy-membership-vk-d{N}.bin` deployed by the contract.
+const PROOF_D5: &[u8; 1601] = include_bytes!(
+    "../../verifier/tests/fixtures/democracy-membership-proof-d5.bin"
+);
+const PROOF_D8: &[u8; 1601] = include_bytes!(
+    "../../verifier/tests/fixtures/democracy-membership-proof-d8.bin"
+);
+const PROOF_D11: &[u8; 1601] = include_bytes!(
+    "../../verifier/tests/fixtures/democracy-membership-proof-d11.bin"
+);
 const PI_D5: &[u8; 64] =
-    include_bytes!("../../verifier/tests/fixtures/pi-d5.bin");
+    include_bytes!("../../verifier/tests/fixtures/democracy-membership-pi-d5.bin");
 const PI_D8: &[u8; 64] =
-    include_bytes!("../../verifier/tests/fixtures/pi-d8.bin");
+    include_bytes!("../../verifier/tests/fixtures/democracy-membership-pi-d8.bin");
 const PI_D11: &[u8; 64] =
-    include_bytes!("../../verifier/tests/fixtures/pi-d11.bin");
+    include_bytes!("../../verifier/tests/fixtures/democracy-membership-pi-d11.bin");
+
+const DEMO_CREATE_PROOF_D5: &[u8; 1601] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-create-proof-d5.bin");
+const DEMO_CREATE_PROOF_D8: &[u8; 1601] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-create-proof-d8.bin");
+const DEMO_CREATE_PROOF_D11: &[u8; 1601] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-create-proof-d11.bin");
+const DEMO_CREATE_PI_D5: &[u8; 96] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-create-pi-d5.bin");
+const DEMO_CREATE_PI_D8: &[u8; 96] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-create-pi-d8.bin");
+const DEMO_CREATE_PI_D11: &[u8; 96] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-create-pi-d11.bin");
 
 const DEMO_UPDATE_PROOF_D5: &[u8; 1601] =
     include_bytes!("../../verifier/tests/fixtures/democracy-update-proof-d5.bin");
@@ -119,13 +139,47 @@ fn be32(env: &Env, value: u64) -> BytesN<32> {
     BytesN::from_array(env, &bytes)
 }
 
-/// PI vector `[commitment, be32(0)]` matching `create_group`'s
-/// membership-PI shape so wire-validation passes and the test exercises
-/// later branches (group_exists, tier limit, etc.).
-fn pi_create_for(env: &Env, commitment: &BytesN<32>) -> Vec<BytesN<32>> {
+/// PI vector `[commitment, be32(0), occupancy_commitment]` matching
+/// the post-issue-#5 democracy-create circuit's 3-PI shape so wire-
+/// validation passes and the test exercises later branches
+/// (group_exists, tier limit, etc.).
+fn pi_create_for(
+    env: &Env,
+    commitment: &BytesN<32>,
+    occupancy_commitment: &BytesN<32>,
+) -> Vec<BytesN<32>> {
     let mut pi = Vec::new(env);
     pi.push_back(commitment.clone());
     pi.push_back(be32(env, 0));
+    pi.push_back(occupancy_commitment.clone());
+    pi
+}
+
+fn demo_create_proof(env: &Env, tier: u32) -> BytesN<1601> {
+    BytesN::from_array(
+        env,
+        match tier {
+            0 => DEMO_CREATE_PROOF_D5,
+            1 => DEMO_CREATE_PROOF_D8,
+            2 => DEMO_CREATE_PROOF_D11,
+            _ => panic!(),
+        },
+    )
+}
+
+fn demo_create_pi(env: &Env, tier: u32) -> Vec<BytesN<32>> {
+    let bytes: &[u8] = match tier {
+        0 => DEMO_CREATE_PI_D5,
+        1 => DEMO_CREATE_PI_D8,
+        2 => DEMO_CREATE_PI_D11,
+        _ => panic!(),
+    };
+    let mut pi = Vec::new(env);
+    for i in 0..3 {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes[i * 32..(i + 1) * 32]);
+        pi.push_back(BytesN::from_array(env, &arr));
+    }
     pi
 }
 
@@ -263,6 +317,8 @@ fn run_verify_membership_happy_path(tier: u32) {
     let pi = pi_membership(&env, tier);
     let commitment = pi.get(0).unwrap();
     let z = canonical_zero(&env);
+    // The democracy-membership canonical witness uses epoch=0 (proves
+    // against the post-create state) so the injected group must agree.
     inject_group(
         &env,
         &contract_id,
@@ -271,7 +327,7 @@ fn run_verify_membership_happy_path(tier: u32) {
         &z,
         CANONICAL_THRESHOLD,
         tier,
-        CANONICAL_EPOCH,
+        0,
     );
     let result = client.verify_membership(&group_id, &membership_proof(&env, tier), &pi);
     assert!(result, "tier {tier} membership proof should verify");
@@ -290,6 +346,175 @@ fn test_verify_membership_happy_path_d8() {
 #[test]
 fn test_verify_membership_happy_path_d11() {
     run_verify_membership_happy_path(2);
+}
+
+// ---- Issue #5: end-to-end create → verify_membership lifecycle ----
+
+/// Closes the lineage gap that prompted issue #5: `create_group`
+/// stored a c that no client could later prove membership against
+/// because the contract verified `verify_membership` proofs under the
+/// anarchy-shape (2-level) membership VK while `create_group` reused
+/// the same VK without binding `occupancy_commitment` in-circuit. The
+/// fix routes both create and verify_membership through democracy-
+/// specific VKs that share the 3-level chain `c =
+/// Poseidon(Poseidon(Poseidon(member_root, epoch), salt), occ)`.
+///
+/// This test pins the round-trip: a real democracy-create proof is
+/// accepted at create time, then the matching democracy-membership
+/// proof verifies against the c the contract stored. Both fixtures
+/// derive from the same canonical witness state (member_root, salt,
+/// occ, epoch=0) in `build_canonical_democracy_create_witness` /
+/// `build_canonical_democracy_membership_witness`, so c is identical
+/// across the two PIs by construction.
+fn run_create_then_verify_membership_lifecycle(tier: u32) {
+    let (env, client, _admin) = setup_env();
+    let group_id = BytesN::from_array(&env, &[(tier as u8 + 20); 32]);
+
+    let create_pi = demo_create_pi(&env, tier);
+    let commitment = create_pi.get(0).unwrap();
+    let occ = create_pi.get(2).unwrap();
+
+    client.create_group(
+        &caller(&env),
+        &group_id,
+        &commitment,
+        &tier,
+        &CANONICAL_THRESHOLD,
+        &occ,
+        &demo_create_proof(&env, tier),
+        &create_pi,
+    );
+
+    let stored = client.get_commitment(&group_id);
+    assert_eq!(stored.commitment, commitment);
+    assert_eq!(stored.epoch, 0);
+    assert_eq!(stored.occupancy_commitment, occ);
+
+    let membership_pi = pi_membership(&env, tier);
+    assert_eq!(
+        membership_pi.get(0).unwrap(),
+        commitment,
+        "membership PI[0] must match the c stored at create",
+    );
+    let result =
+        client.verify_membership(&group_id, &membership_proof(&env, tier), &membership_pi);
+    assert!(
+        result,
+        "tier {tier} membership proof must verify against the post-create commitment",
+    );
+}
+
+#[test]
+fn test_create_then_verify_membership_lifecycle_d5() {
+    run_create_then_verify_membership_lifecycle(0);
+}
+
+#[test]
+fn test_create_then_verify_membership_lifecycle_d8() {
+    run_create_then_verify_membership_lifecycle(1);
+}
+
+#[test]
+fn test_create_then_verify_membership_lifecycle_d11() {
+    run_create_then_verify_membership_lifecycle(2);
+}
+
+// ---- Issue #5 follow-up: end-to-end create → update_commitment lifecycle ----
+
+/// Pin the create→update side of the lineage gap closed in issue #5.
+/// `update_commitment` always required a 3-level c at the same shape
+/// `democracy-update-vk-d{N}` was baked against; pre-fix, `create_group`
+/// stored a 2-level c (anarchy-shape) so update was unreachable. This
+/// test confirms the fresh state set by `create_group` satisfies every
+/// contract-side gate `update_commitment` checks before the verifier
+/// runs:
+///
+///   1. PI count == 6
+///   2. PI[0] (`c_old`) == `state.commitment`
+///   3. PI[1] (`epoch_old`) == `be32(state.epoch == 0)`
+///   4. `is_canonical_fr(c_new)` and `is_canonical_fr(occ_new)`
+///   5. PI[3] (`occ_old`) == `state.occupancy_commitment`
+///   6. PI[5] (`threshold`) == `be32(state.threshold_numerator)`
+///   7. proof-replay check passes
+///
+/// Reaching the verifier itself proves the create→update PI handshake
+/// works end-to-end. The committed `democracy-update-proof-d{N}` was
+/// generated under an independent canonical witness (epoch_old=1234,
+/// c_old != post-create commitment), so the verifier rejects when fed
+/// our post-create PI; the call panics with `InvalidProof = 7`.
+///
+/// What this catches: any future regression that re-introduces a c
+/// mismatch between create and update — failing at gate (2), (3), (5),
+/// or (6) — surfaces as a different error code, breaking the
+/// `should_panic` match. A follow-up that re-bakes the
+/// `democracy-update-proof-d{N}` fixture with `epoch_old=0` and
+/// `c_old=post-create commitment` (the natural chained witness) would
+/// flip the assertion from "panics with #7" to "succeeds and advances
+/// epoch to 1"; that's strictly stronger and worth doing once the
+/// upstream baker grows a chained-witness mode.
+fn run_create_then_update_commitment_lifecycle(tier: u32) {
+    let (env, client, _admin) = setup_env();
+    let group_id = BytesN::from_array(&env, &[(tier as u8 + 30); 32]);
+
+    // Step 1: create_group with the real democracy-create fixture.
+    // Mirrors run_create_then_verify_membership_lifecycle's setup so
+    // the post-create state is identical to the verify-side test's
+    // starting point.
+    let create_pi = demo_create_pi(&env, tier);
+    let c_create = create_pi.get(0).unwrap();
+    let occ_create = create_pi.get(2).unwrap();
+    client.create_group(
+        &caller(&env),
+        &group_id,
+        &c_create,
+        &tier,
+        &CANONICAL_THRESHOLD,
+        &occ_create,
+        &demo_create_proof(&env, tier),
+        &create_pi,
+    );
+
+    // Step 2: construct an update PI matching every contract-side gate
+    // against the post-create state. c_new / occ_new are arbitrary
+    // canonical Fr scalars (last byte set so they round-trip through
+    // `is_canonical_fr`).
+    let mut c_new_bytes = [0u8; 32];
+    c_new_bytes[31] = 0x01;
+    let c_new = BytesN::from_array(&env, &c_new_bytes);
+    let mut occ_new_bytes = [0u8; 32];
+    occ_new_bytes[31] = 0x02;
+    let occ_new = BytesN::from_array(&env, &occ_new_bytes);
+
+    let mut upi = Vec::new(&env);
+    upi.push_back(c_create.clone());
+    upi.push_back(be32(&env, 0));
+    upi.push_back(c_new);
+    upi.push_back(occ_create.clone());
+    upi.push_back(occ_new);
+    upi.push_back(be32(&env, CANONICAL_THRESHOLD as u64));
+
+    // Step 3: call update_commitment. PI handshake must pass; verifier
+    // rejects (proof was generated under a different witness) →
+    // `Error::InvalidProof = 7`.
+    client.update_commitment(&group_id, &demo_update_proof(&env, tier), &upi);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_create_then_update_commitment_lifecycle_d5() {
+    run_create_then_update_commitment_lifecycle(0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_create_then_update_commitment_lifecycle_d8() {
+    run_create_then_update_commitment_lifecycle(1);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_create_then_update_commitment_lifecycle_d11() {
+    run_create_then_update_commitment_lifecycle(2);
 }
 
 // ---- Reject paths ----
@@ -397,7 +622,7 @@ fn test_create_group_rejects_non_canonical_commitment() {
     let (env, client, _admin) = setup_env();
     let bad = non_canonical_fr(&env);
     let z = canonical_zero(&env);
-    let pi = pi_create_for(&env, &bad);
+    let pi = pi_create_for(&env, &bad, &z);
     client.create_group(
         &caller(&env),
         &BytesN::from_array(&env, &[1u8; 32]),
@@ -416,7 +641,7 @@ fn test_create_group_rejects_non_canonical_occupancy_commitment() {
     let (env, client, _admin) = setup_env();
     let z = canonical_zero(&env);
     let bad_occ = non_canonical_fr(&env);
-    let pi = pi_create_for(&env, &z);
+    let pi = pi_create_for(&env, &z, &bad_occ);
     client.create_group(
         &caller(&env),
         &BytesN::from_array(&env, &[2u8; 32]),
@@ -437,7 +662,7 @@ fn test_create_group_rejects_duplicate_group_id() {
     let group_id = BytesN::from_array(&env, &[3u8; 32]);
     let z = canonical_zero(&env);
     inject_group(&env, &contract_id, &group_id, &z, &z, 50, 0, 0);
-    let pi = pi_create_for(&env, &z);
+    let pi = pi_create_for(&env, &z, &z);
     client.create_group(
         &caller(&env),
         &group_id,
@@ -461,7 +686,7 @@ fn test_create_group_enforces_tier_group_limit() {
             .set(&DataKey::GroupCount(0u32), &10_000u32);
     });
     let z = canonical_zero(&env);
-    let pi = pi_create_for(&env, &z);
+    let pi = pi_create_for(&env, &z, &z);
     client.create_group(
         &caller(&env),
         &BytesN::from_array(&env, &[42u8; 32]),
@@ -483,7 +708,7 @@ fn test_create_group_restricted_mode_rejects_non_admin() {
     let (env, client, _admin) = setup_env();
     client.set_restricted_mode(&true);
     let z = canonical_zero(&env);
-    let pi = pi_create_for(&env, &z);
+    let pi = pi_create_for(&env, &z, &z);
     client.create_group(
         &caller(&env),
         &BytesN::from_array(&env, &[55u8; 32]),
@@ -712,12 +937,11 @@ fn test_verify_membership_rejects_wrong_commitment() {
 #[test]
 #[should_panic(expected = "Error(Contract, #10)")]
 fn test_verify_membership_rejects_wrong_epoch() {
-    // Stored epoch diverges from PI[1] (the fixture encodes
-    // `be32(CANONICAL_EPOCH)` — pinned by run_verify_membership_happy_
-    // path), so the entrypoint's `epoch != be32_from_u64(stored.epoch)`
-    // check fires before the verifier sees the proof. Parallels
-    // test_verify_membership_rejects_wrong_commitment for the second
-    // membership PI slot.
+    // Stored epoch diverges from PI[1] (the democracy-membership fixture
+    // encodes `be32(0)`), so the entrypoint's `epoch !=
+    // be32_from_u64(stored.epoch)` check fires before the verifier sees
+    // the proof. Parallels test_verify_membership_rejects_wrong_commitment
+    // for the second membership PI slot.
     let (env, client, _admin) = setup_env();
     let contract_id = client.address.clone();
     let group_id = BytesN::from_array(&env, &[72u8; 32]);
@@ -732,7 +956,7 @@ fn test_verify_membership_rejects_wrong_epoch() {
         &z,
         CANONICAL_THRESHOLD,
         0,
-        CANONICAL_EPOCH + 1, // diverges from PI[1] = be32(CANONICAL_EPOCH)
+        CANONICAL_EPOCH, // diverges from PI[1] = be32(0)
     );
     client.verify_membership(&group_id, &membership_proof(&env, 0), &pi);
 }
@@ -886,6 +1110,8 @@ fn bench_verify_membership_at_tier(tier: u32) {
     let pi = pi_membership(&env, tier);
     let commitment = pi.get(0).unwrap();
     let z = canonical_zero(&env);
+    // Democracy-membership canonical witness uses epoch=0; the bench
+    // injects state at the same epoch so PI[1] == be32(state.epoch).
     inject_group(
         &env,
         &contract_id,
@@ -894,7 +1120,7 @@ fn bench_verify_membership_at_tier(tier: u32) {
         &z,
         CANONICAL_THRESHOLD,
         tier,
-        CANONICAL_EPOCH,
+        0,
     );
 
     env.cost_estimate().budget().reset_tracker();
