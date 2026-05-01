@@ -1,0 +1,41 @@
+[package]
+name = "sep-oneonone-contract"
+version = "0.1.0"
+edition = "2021"
+description = "Soroban smart contract for SEP 1v1: per-type immutable two-party group. No update path, no deactivate, no quorum, no admin set, no tier parameter (tier=0 hardcoded). PLONK-verified (BLS12-381 + EF KZG SRS) via the shared plonk-verifier crate."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+# `=26.0.0-rc.1` is intentional and workspace-coordinated: Phase C.2
+# bumped sep-anarchy + plonk-verifier + sep-oneonone to the same
+# release-candidate floor (see contracts/plonk-verifier/Cargo.toml for
+# the rustc-floor note). The `=` exact pin is load-bearing for the
+# baked immutable VKs — a host-primitive ABI shift between RC builds
+# could change BLS12-381 / Keccak semantics and re-mint the
+# verification path. When 26.0.0 final ships, bump all three crates
+# in the same PR.
+soroban-sdk = { version = "=26.0.0-rc.1", features = ["alloc"] }
+plonk-verifier = { path = "../verifier" }
+
+[dev-dependencies]
+soroban-sdk = { version = "=26.0.0-rc.1", features = ["alloc", "testutils"] }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

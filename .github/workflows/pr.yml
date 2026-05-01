@@ -1,0 +1,82 @@
+name: PR Build
+
+# Per-flavor build + test on PRs. The `release.yml` workflow (tag push)
+# does the source-attested build for stellar.expert; this one is the
+# faster CI signal during development.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  plonk-contracts:
+    name: plonk / ${{ matrix.contract }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        contract:
+          - sep-anarchy
+          - sep-democracy
+          - sep-oligarchy
+          - sep-oneonone
+          - sep-tyranny
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            plonk/${{ matrix.contract }}/target
+          key: pr-${{ matrix.contract }}-${{ hashFiles(format('plonk/{0}/Cargo.toml', matrix.contract), 'plonk/verifier/Cargo.toml') }}
+
+      - name: cargo test --lib
+        working-directory: plonk/${{ matrix.contract }}
+        run: cargo test --lib
+
+      - name: cargo build --release (wasm32v1-none)
+        working-directory: plonk/${{ matrix.contract }}
+        run: cargo build --release --target wasm32v1-none
+
+  plonk-verifier:
+    name: plonk / verifier
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            plonk/verifier/target
+          key: pr-verifier-${{ hashFiles('plonk/verifier/Cargo.toml') }}
+
+      - name: cargo test
+        working-directory: plonk/verifier
+        run: cargo test

@@ -1,0 +1,176 @@
+name: Release Contracts
+
+# On tag push:
+#   1. The five `sep-*` jobs build each contract WASM via the
+#      `stellar-expert/soroban-build-workflow` action, which:
+#        - publishes the WASM as a release asset, and
+#        - registers source-code attestation against the GitHub repo +
+#          tag so stellar.expert can show the source-of-record link
+#          on each contract page (gated on `home_domain: 'onym.chat'`).
+#   2. After all five contract builds finish, the `bench-gas` job
+#      deploys the freshly-tagged contracts to Stellar testnet,
+#      measures per-op fees via `stellar contract invoke --sim-only`,
+#      renders a markdown table + JSONL, and overwrites the release
+#      body with the rendered table. Raw JSONL stays on the workflow
+#      run as an artifact for downstream tooling.
+#
+# Both halves run on the same tag — `v*` — so the release ends up
+# carrying both the verified WASMs and the testnet bench numbers.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  id-token: write
+  contents: write
+  attestations: write
+
+jobs:
+  sep-anarchy:
+    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
+    with:
+      release_name: ${{ github.ref_name }}
+      relative_path: '["plonk/sep-anarchy"]'
+      package: 'sep-anarchy-contract'
+      home_domain: 'onym.chat'
+    secrets:
+      release_token: ${{ secrets.GITHUB_TOKEN }}
+
+  sep-democracy:
+    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
+    with:
+      release_name: ${{ github.ref_name }}
+      relative_path: '["plonk/sep-democracy"]'
+      package: 'sep-democracy-contract'
+      home_domain: 'onym.chat'
+    secrets:
+      release_token: ${{ secrets.GITHUB_TOKEN }}
+
+  sep-oligarchy:
+    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
+    with:
+      release_name: ${{ github.ref_name }}
+      relative_path: '["plonk/sep-oligarchy"]'
+      package: 'sep-oligarchy-contract'
+      home_domain: 'onym.chat'
+    secrets:
+      release_token: ${{ secrets.GITHUB_TOKEN }}
+
+  sep-oneonone:
+    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
+    with:
+      release_name: ${{ github.ref_name }}
+      relative_path: '["plonk/sep-oneonone"]'
+      package: 'sep-oneonone-contract'
+      home_domain: 'onym.chat'
+    secrets:
+      release_token: ${{ secrets.GITHUB_TOKEN }}
+
+  sep-tyranny:
+    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
+    with:
+      release_name: ${{ github.ref_name }}
+      relative_path: '["plonk/sep-tyranny"]'
+      package: 'sep-tyranny-contract'
+      home_domain: 'onym.chat'
+    secrets:
+      release_token: ${{ secrets.GITHUB_TOKEN }}
+
+  bench-gas:
+    needs: [sep-anarchy, sep-democracy, sep-oligarchy, sep-oneonone, sep-tyranny]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Each contract crate's `rust-toolchain.toml` pins 1.91.0 (the
+      # `=26.0.0-rc.1` `soroban-sdk` floor). The bench job builds via
+      # `cargo` directly, so let `RUSTUP_TOOLCHAIN=stable` win — the
+      # toolchain dtolnay/rust-toolchain installs below is the one
+      # `cargo` ends up using.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: bench-gas-rust-${{ hashFiles('plonk/**/Cargo.toml') }}
+
+      - name: Install stellar CLI
+        env:
+          # Pin to the version the maintainer's local dev env runs
+          # (`stellar --version` → 26.0.0). Bump in lockstep with the
+          # rest of the repo if a deploy script switches.
+          STELLAR_VERSION: '26.0.0'
+          # SHA-256 of stellar-cli-26.0.0-x86_64-unknown-linux-gnu.tar.gz,
+          # captured 2026-05-01 from the official GitHub release. The job
+          # has `contents: write`, so verifying the toolchain we rely on
+          # before extracting is cheap insurance against an upstream
+          # release-asset compromise.
+          STELLAR_SHA256: '31c83db342d1184b31f6591e739950eb45756be46dcd7bb57e4f38e91ea32e84'
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tarball="$tmp/stellar-cli.tar.gz"
+          curl -sSLf -o "$tarball" \
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_VERSION}/stellar-cli-${STELLAR_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${STELLAR_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xz -C "$tmp" -f "$tarball"
+          # Don't assume the binary lives at the tarball root — extract
+          # to a scratch dir and `install` whatever named `stellar`
+          # turned up. v26 happens to have it at the root; later releases
+          # may not.
+          binary="$(find "$tmp" -maxdepth 3 -type f -name stellar -perm -u+x | head -1)"
+          test -n "$binary" || { echo "no stellar binary in tarball" >&2; exit 1; }
+          sudo install -m 0755 "$binary" /usr/local/bin/stellar
+          rm -rf "$tmp"
+          stellar --version
+
+      - name: Configure stellar testnet
+        run: |
+          stellar network add testnet \
+            --rpc-url https://soroban-testnet.stellar.org \
+            --network-passphrase "Test SDF Network ; September 2015" || true
+
+      - name: Run gas benchmarks
+        env:
+          BENCH_NETWORK: testnet
+          BENCH_TAG: ${{ github.ref_name }}
+        run: |
+          chmod +x scripts/bench-gas/run.sh \
+                   scripts/bench-gas/setup.sh \
+                   scripts/bench-gas/contracts/*.sh
+          bash scripts/bench-gas/run.sh
+
+      - name: Upload workflow artifacts (raw JSONL + rendered body)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gas-benchmarks-${{ github.ref_name }}
+          path: |
+            scripts/bench-gas/results.md
+            scripts/bench-gas/results.jsonl
+          if-no-files-found: error
+
+      - name: Set release body to bench output
+        # Replaces the release body wholesale with the rendered
+        # markdown (table + contract addresses linking to
+        # stellar.expert). The raw JSONL is still attached as a
+        # workflow artifact for downstream tooling but no longer
+        # rides along on the release itself.
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          body_path: scripts/bench-gas/results.md

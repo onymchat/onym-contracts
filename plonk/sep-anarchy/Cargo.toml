@@ -1,0 +1,53 @@
+[package]
+name = "sep-anarchy-contract"
+version = "0.1.0"
+edition = "2021"
+description = "Soroban smart contract for SEP Anarchy: per-type single-signer membership group with no quorum, no admin set, and no occupancy-commitment hiding (member_count informational). PLONK-verified (BLS12-381 + EF KZG SRS) via the shared plonk-verifier crate."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+# Bumped from 25.3.0 to 26.0.0-rc.1 in lockstep with the plonk-verifier
+# crate (which requires =26.0.0-rc.1 for its host BLS12-381 surface).
+# rustc floor: 1.91.0 — pinned in `rust-toolchain.toml`.
+#
+# `=26.0.0-rc.1` is a release candidate; before any testnet deploy,
+# confirm that the public testnet host accepts a contract built against
+# this RC (RC builds have occasionally hit host-version-mismatch on
+# Stellar testnet).
+#
+# `alloc` feature enables soroban-sdk's bump-pointer allocator. The
+# plonk-verifier crate uses `alloc::vec::Vec` internally (for the
+# public-input array threaded into `evaluate_pi_poly`) so the contract
+# WASM must register an allocator. Per the SDK docs, the bump-pointer
+# never frees — fine for our case where each invocation runs to
+# completion and the VM is discarded.
+soroban-sdk = { version = "=26.0.0-rc.1", features = ["alloc"] }
+
+# Shared no_std PLONK verifier — `plonk_verifier::verifier::verify` is
+# the single entry point this contract calls; everything else (the
+# transcript, the polynomial helpers, the aggregation modules) is an
+# implementation detail of that crate.
+plonk-verifier = { path = "../verifier" }
+
+[dev-dependencies]
+soroban-sdk = { version = "=26.0.0-rc.1", features = ["alloc", "testutils"] }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

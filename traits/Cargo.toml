@@ -1,0 +1,13 @@
+[package]
+name = "onym-contract-traits"
+version = "0.1.0"
+edition = "2021"
+description = "Shared Soroban interface types for onym.chat governance contracts. Each verifier-flavor (plonk, future pq, future ffi) implements these so contract addresses are interchangeable from the client's POV regardless of the underlying SNARK."
+license = "MIT"
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+soroban-sdk = { version = "=26.0.0-rc.1", features = ["alloc"] }
