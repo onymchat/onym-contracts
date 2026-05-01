@@ -190,7 +190,7 @@ fn inject_inactive_group(env: &Env, contract_id: &Address, group_id: &BytesN<32>
             tier,
             active: false,
             occupancy_commitment: z,
-            threshold_numerator: 50,
+            threshold_numerator: CANONICAL_THRESHOLD,
         };
         env.storage()
             .persistent()
@@ -530,7 +530,35 @@ fn test_create_group_rejects_invalid_threshold() {
         &BytesN::from_array(&env, &[1u8; 32]),
         &z,
         &0u32,
-        &101u32, // out of [1, 100]
+        // Out of [1, MAX_THRESHOLD_NUMERATOR]. Pre-issue-#14 the bound
+        // was [1, 100] (as if percentage); the prover's 2-bit threshold
+        // gate caps it at K_MAX = 2 absolute.
+        &101u32,
+        &z,
+        &malformed_proof(&env),
+        &pi,
+    );
+}
+
+/// Issue #14: anything above `MAX_THRESHOLD_NUMERATOR = K_MAX = 2`
+/// must be rejected at create time. Pre-fix the contract accepted up
+/// to 100 — `threshold_numerator = 3` would have created a group that
+/// could never be updated (the prover circuit's 2-bit gate would
+/// always reject the PI). Pin the new boundary at the smallest
+/// disallowed value.
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")]
+fn test_create_group_rejects_threshold_above_k_max() {
+    let (env, client, _admin) = setup_env();
+    let c = caller(&env);
+    let z = canonical_zero(&env);
+    let pi = pi_create_for(&env, &z, &z);
+    client.create_group(
+        &c,
+        &BytesN::from_array(&env, &[80u8; 32]),
+        &z,
+        &0u32,
+        &3u32,
         &z,
         &malformed_proof(&env),
         &pi,
@@ -549,7 +577,7 @@ fn test_create_group_rejects_invalid_tier() {
         &BytesN::from_array(&env, &[1u8; 32]),
         &z,
         &3u32,
-        &50u32,
+        &CANONICAL_THRESHOLD,
         &z,
         &malformed_proof(&env),
         &pi,
@@ -568,7 +596,7 @@ fn test_create_group_rejects_disabled_large_tier() {
         &BytesN::from_array(&env, &[2u8; 32]),
         &z,
         &2u32,
-        &50u32,
+        &CANONICAL_THRESHOLD,
         &z,
         &malformed_proof(&env),
         &pi,
@@ -615,11 +643,11 @@ fn test_get_commitment_returns_state() {
     let contract_id = client.address.clone();
     let group_id = BytesN::from_array(&env, &[50u8; 32]);
     let z = canonical_zero(&env);
-    inject_group(&env, &contract_id, &group_id, &z, &z, 51, 1, 3);
+    inject_group(&env, &contract_id, &group_id, &z, &z, 2, 1, 3);
     let entry = client.get_commitment(&group_id);
     assert_eq!(entry.tier, 1);
     assert_eq!(entry.epoch, 3);
-    assert_eq!(entry.threshold_numerator, 51);
+    assert_eq!(entry.threshold_numerator, 2);
 }
 
 #[test]
@@ -628,7 +656,7 @@ fn test_bump_group_ttl_extends() {
     let contract_id = client.address.clone();
     let group_id = BytesN::from_array(&env, &[52u8; 32]);
     let z = canonical_zero(&env);
-    inject_group(&env, &contract_id, &group_id, &z, &z, 50, 0, 0);
+    inject_group(&env, &contract_id, &group_id, &z, &z, CANONICAL_THRESHOLD, 0, 0);
     client.bump_group_ttl(&group_id);
 }
 
@@ -646,7 +674,7 @@ fn test_create_group_rejects_non_canonical_commitment() {
         &BytesN::from_array(&env, &[1u8; 32]),
         &bad,
         &0u32,
-        &50u32,
+        &CANONICAL_THRESHOLD,
         &z,
         &malformed_proof(&env),
         &pi,
@@ -665,7 +693,7 @@ fn test_create_group_rejects_non_canonical_occupancy_commitment() {
         &BytesN::from_array(&env, &[2u8; 32]),
         &z,
         &0u32,
-        &50u32,
+        &CANONICAL_THRESHOLD,
         &bad_occ,
         &malformed_proof(&env),
         &pi,
@@ -679,14 +707,14 @@ fn test_create_group_rejects_duplicate_group_id() {
     let contract_id = client.address.clone();
     let group_id = BytesN::from_array(&env, &[3u8; 32]);
     let z = canonical_zero(&env);
-    inject_group(&env, &contract_id, &group_id, &z, &z, 50, 0, 0);
+    inject_group(&env, &contract_id, &group_id, &z, &z, CANONICAL_THRESHOLD, 0, 0);
     let pi = pi_create_for(&env, &z, &z);
     client.create_group(
         &caller(&env),
         &group_id,
         &z,
         &0u32,
-        &50u32,
+        &CANONICAL_THRESHOLD,
         &z,
         &malformed_proof(&env),
         &pi,
@@ -710,7 +738,7 @@ fn test_create_group_enforces_tier_group_limit() {
         &BytesN::from_array(&env, &[42u8; 32]),
         &z,
         &0u32,
-        &50u32,
+        &CANONICAL_THRESHOLD,
         &z,
         &malformed_proof(&env),
         &pi,
@@ -732,7 +760,7 @@ fn test_create_group_restricted_mode_rejects_non_admin() {
         &BytesN::from_array(&env, &[55u8; 32]),
         &z,
         &0u32,
-        &50u32,
+        &CANONICAL_THRESHOLD,
         &z,
         &malformed_proof(&env),
         &pi,

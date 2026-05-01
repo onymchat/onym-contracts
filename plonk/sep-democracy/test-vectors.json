@@ -22,7 +22,7 @@
       { "name": "TierGroupLimitReached", "code": 13 },
       { "name": "AdminOnly", "code": 14, "note": "create_group in restricted mode rejects non-admin callers (caller != admin after caller.require_auth)" },
       { "name": "InvalidCommitmentEncoding", "code": 15 },
-      { "name": "InvalidThreshold", "code": 28, "note": "create_group rejects threshold_numerator < 1 || > 100; per design v0.5.1 §4.7.6" }
+      { "name": "InvalidThreshold", "code": 28, "note": "create_group rejects threshold_numerator < 1 || > MAX_THRESHOLD_NUMERATOR (= K_MAX = 2). Pre-issue-#14 the bound was [1, 100] as if percentage, but the prover circuit's 2-bit gate caps it at K_MAX absolute." }
     ],
     "dropped_from_sep_xxxx": [
       { "name": "Reserved3", "code": 3, "reason": "previously Unauthorized; admin checks now use require_auth() which panics. Variant removed from the contract enum on the PLONK migration; code 3 is unallocated." },
@@ -84,30 +84,29 @@
   },
 
   "create_group_validation": {
-    "description": "Per-call validation in `create_group`. Single-type contract — no per-type dispatch. Threshold must be present (this is Democracy) and in [1, 100].",
+    "description": "Per-call validation in `create_group`. Single-type contract — no per-type dispatch. Threshold is an absolute count of active signers required to authorise an update (issue #14): bounded by MAX_THRESHOLD_NUMERATOR = K_MAX = 2, matching the prover circuit's 2-bit gate. Pre-fix the contract accepted [1, 100] as if percentage semantics were enforced in-circuit; they aren't, so values > K_MAX bricked groups from update.",
     "rules": [
       "tier ∈ {0, 1}; tier 2 and out-of-range values → InvalidTier",
-      "threshold_numerator ∈ [1, 100]; out of range → InvalidThreshold",
+      "threshold_numerator ∈ [1, MAX_THRESHOLD_NUMERATOR] (= [1, 2]); out of range → InvalidThreshold",
       "group_id MUST NOT already be assigned to a live or inactive group; collision → GroupAlreadyExists",
       "commitment and occupancy_commitment_initial MUST be canonical Fr encodings (Fr::from_bytes ∘ Fr::to_bytes round-trip); non-canonical → InvalidCommitmentEncoding",
       "GroupCount(tier) MUST be < MAX_GROUPS_PER_TIER (10000); exceeded → TierGroupLimitReached",
       "if RestrictedMode is true: caller MUST equal Admin, else AdminOnly (caller.require_auth() runs first)",
-      "proof MUST verify under the membership VK at `tier` against the supplied (commitment, epoch=0) public inputs; failure → InvalidProof",
+      "proof MUST verify under the democracy-create VK at `tier` against the supplied (commitment, epoch=0, occupancy_commitment_initial) public inputs; failure → InvalidProof",
       "proof_hash(proof) MUST NOT be in UsedProof storage; collision → ProofReplay"
     ],
     "threshold_numerator_validation": {
+      "semantics_note": "Absolute K, not percentage. Values are the literal count of active signer slots required to authorise an update. Promoting to ratio semantics (K * 100 ≥ threshold · member_count) requires a wider in-circuit range gate + multiplicative constraint and is deferred alongside K_MAX > 2.",
       "valid_vectors": [
-        { "threshold_numerator": 1, "semantics": "single-vote-passes (degenerate; allowed by spec)" },
-        { "threshold_numerator": 50, "semantics": "simple majority (default per UI; non-strict — ties pass per §4.7.6)" },
-        { "threshold_numerator": 51, "semantics": "strict majority (ties fail)" },
-        { "threshold_numerator": 67, "semantics": "two-thirds supermajority" },
-        { "threshold_numerator": 75, "semantics": "three-quarters supermajority" },
-        { "threshold_numerator": 100, "semantics": "unanimous" }
+        { "threshold_numerator": 1, "semantics": "any single signer authorises update (K=1 active slot suffices)" },
+        { "threshold_numerator": 2, "semantics": "both K_MAX slots must be active — unanimous-of-quorum at K_MAX = 2" }
       ],
       "invalid_vectors": [
         { "threshold_numerator": 0, "expected_error": "InvalidThreshold" },
+        { "threshold_numerator": 3, "expected_error": "InvalidThreshold", "note": "fits 2-bit gate but exceeds K_MAX = 2" },
+        { "threshold_numerator": 50, "expected_error": "InvalidThreshold", "note": "pre-fix would have passed contract-side; circuit's 2-bit gate would have rejected at update" },
+        { "threshold_numerator": 100, "expected_error": "InvalidThreshold" },
         { "threshold_numerator": 101, "expected_error": "InvalidThreshold" },
-        { "threshold_numerator": 200, "expected_error": "InvalidThreshold" },
         { "threshold_numerator": 255, "expected_error": "InvalidThreshold" }
       ]
     }
@@ -197,6 +196,7 @@
       },
       {
         "rule": "100·K ≥ threshold_numerator · popcount(bitmap_old) (quorum, non-strict — ties pass)",
+        "status": "ASPIRATIONAL — NOT enforced as of issue #14. The deployed circuit enforces the simpler absolute gate `K ≥ threshold_numerator` with `threshold_numerator ∈ [0, K_MAX]` (= [0, 2]) via 2-bit decomposition. The contract now bounds `threshold_numerator ∈ [1, K_MAX]` so the bound the contract advertises matches what the circuit can satisfy. Promoting to the ratio rule below requires wider range checks + an in-circuit multiplicative constraint and is deferred alongside K_MAX > 2.",
         "rationale": "configurable per group (§4.7.6); K is the number of signers in the proof. K=1 is the single-signer subset baseline (§4.2). Non-strict >= means threshold=50 with m_old=4, K=2 (200 ≥ 200) passes — natural reading of 'simple majority = at least half'.",
         "single_signer_examples": [
           { "threshold_numerator": 50, "popcount_old": 1, "K": 1, "valid": true, "calc": "100·1 ≥ 50·1 ⟺ 100 ≥ 50" },

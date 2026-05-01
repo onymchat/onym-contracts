@@ -222,14 +222,19 @@ single-signer fallback (an SRS-budget constraint, see Notes).
   until a real d11 quorum circuit lands. `verify_membership` still keeps
   the d11 membership VK available for read-only verification of any
   already-existing tier-2 state.
-- **Threshold range mismatch**: the contract validates
-  `threshold_numerator ∈ [1, 100]` (a percentage), but the quorum
-  circuit's 2-bit range gate constrains it to `[0, 3]` — practical
-  ceiling at K_MAX = 2. Calls with `threshold > K_MAX` pre-validate
-  through the contract but fail in-circuit at `verify_plonk_proof`,
-  surfaced as `Error::InvalidProof`. Documented divergence; the
-  intended semantics (percentage-of-N) require a wider range gate +
-  a multiplicative constraint that's deferred.
+- **Threshold semantics — absolute K, not percentage (issue
+  [#14](https://github.com/onymchat/onym-contracts/issues/14))**:
+  the contract validates `threshold_numerator ∈ [1, K_MAX]` where
+  `K_MAX = 2`, matching the prover circuit's 2-bit threshold gate.
+  Pre-fix the contract accepted `[1, 100]` as if percentage
+  semantics were enforced in-circuit; they aren't, so calls with
+  `threshold > K_MAX` would pre-validate at create but fail
+  in-circuit at the next `update_commitment`, surfaced as
+  `Error::InvalidProof`. The contract surface now honestly reflects
+  what the circuit can satisfy. Promoting to ratio semantics
+  (`K * 100 ≥ threshold_numerator · member_count`) requires a
+  wider range gate + a multiplicative constraint and is deferred
+  alongside the K_MAX > 2 work.
 - **Create-side gaps (DO NOT SHIP user-visible)** per the contract's
   module-level "Status — simplified initial port" docstring:
    - `create_group` reuses anarchy's 2-PI membership VK, so

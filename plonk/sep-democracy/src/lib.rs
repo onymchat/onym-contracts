@@ -20,6 +20,26 @@
 //! can distinguish two groups with different thresholds. On-wire
 //! threshold privacy is not a property of this design.
 //!
+//! ## Threshold semantics — absolute K, not percentage (issue #14)
+//!
+//! `threshold_numerator` is the **absolute** count of active signers
+//! required to authorise an update — bounded by
+//! `MAX_THRESHOLD_NUMERATOR = K_MAX = 2`. The prover circuit
+//! decomposes the value into 2 bits; calls with a threshold above
+//! `K_MAX` cannot satisfy the in-circuit gate.
+//!
+//! Pre-fix this contract accepted `[1, 100]` as if percentage
+//! semantics were enforced in-circuit; they aren't, so groups
+//! created with threshold ∈ `[K_MAX+1, 100]` were bricked from
+//! `update_commitment` (verifier would always reject the
+//! 2-bit-overflowing PI). The bound now matches what the circuit
+//! actually verifies.
+//!
+//! Promoting to ratio semantics
+//! (`K * 100 ≥ threshold_numerator * member_count`) is a follow-up
+//! requiring wider range checks + a multiplicative constraint in
+//! the circuit; tracked alongside the K_MAX > 2 work.
+//!
 //! ## Tier status
 //!
 //! Tier 0/1 create and update route through democracy-specific VKs that
@@ -65,6 +85,18 @@ const MAX_GROUPS_PER_TIER: u32 = 10_000;
 // do not allow new large democracy groups or large democracy updates until
 // a real d11 quorum circuit lands.
 const MAX_DEMOCRACY_QUORUM_TIER: u32 = 1;
+// Absolute-K threshold ceiling (issue #14). Mirrors the prover-side
+// `circuit::plonk::democracy::K_MAX = 2`: the quorum circuit decomposes
+// `threshold_numerator` into 2 bits, so any value above 3 cannot satisfy
+// the in-circuit gate, and `K_MAX = 2` further bounds it at 2 active
+// signers. Pre-fix this contract accepted [1, 100] as if the value were
+// a percentage; calls with threshold ∈ [3, 100] created a group that
+// could never be updated (verifier would always reject the
+// 2-bit-overflowing PI). Until the circuit grows a ratio gate
+// `K * 100 ≥ threshold * member_count` (deferred), the contract surface
+// honestly reflects what the circuit can satisfy: an absolute count of
+// active signers required to authorise an update.
+const MAX_THRESHOLD_NUMERATOR: u32 = 2;
 
 const MEMBERSHIP_PI_COUNT: u32 = 2;
 /// `(commitment, epoch=0, occupancy_commitment_initial)` — the
@@ -317,7 +349,11 @@ impl SepDemocracyContract {
         if tier > MAX_DEMOCRACY_QUORUM_TIER {
             return Err(Error::InvalidTier);
         }
-        if threshold_numerator < 1 || threshold_numerator > 100 {
+        // Issue #14: absolute-K bound matches the prover circuit's 2-bit
+        // threshold gate (`K_MAX = 2`). Pre-fix the contract accepted
+        // [1, 100] as if percentage semantics were enforced in-circuit;
+        // they aren't, so values > K_MAX bricked the group from update.
+        if threshold_numerator < 1 || threshold_numerator > MAX_THRESHOLD_NUMERATOR {
             return Err(Error::InvalidThreshold);
         }
         if !is_canonical_fr(&commitment) {
