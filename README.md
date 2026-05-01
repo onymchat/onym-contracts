@@ -1,52 +1,197 @@
 # onym-contracts
 
-Soroban smart contracts for onym.chat — five per-governance-type membership / state contracts (`sep-anarchy`, `sep-democracy`, `sep-oligarchy`, `sep-oneonone`, `sep-tyranny`), structured to host multiple verifier flavors side-by-side.
-
-## Layout
+Family of per-governance-type Soroban smart contracts for onym.chat —
+**five flavors of group state**, sharing the same Soroban call shape across
+verifier-flavor sub-trees so client code can target any contract address
+without branching on the underlying SNARK.
 
 ```
-onym-contracts/
-├── traits/              shared Soroban interface types (Error / DataKey / CommitmentEntry)
-├── plonk/               PLONK + EF KZG SRS flavor (TurboPlonk via jf-plonk on BLS12-381)
-│   ├── verifier/        on-chain verifier crate (Soroban-portable, BLS12-381 host fns)
-│   ├── sep-anarchy/
-│   ├── sep-democracy/
-│   ├── sep-oligarchy/
-│   ├── sep-oneonone/
-│   ├── sep-tyranny/
-│   └── tests/fixtures/  baked VK + canonical proof + PI byte fixtures (committed)
-├── pq/                  (planned) post-quantum flavor — STARK / lattice-based
-├── ffi/                 (planned) alternative-SNARK flavor
-├── scripts/bench-gas/   testnet gas-cost bench driver (shell + python)
-└── .github/workflows/
-    ├── release.yml      tag push → stellar-expert source-attested build + testnet bench
-    └── pr.yml           per-flavor build+test on PRs
+                       FAMILY  —  pick by who can update
+                       ═════════════════════════════════════════════════
+
+  contract        members  admins   who can advance state?    auth shape
+  ───────────     ───────  ───────  ──────────────────────    ───────────
+  sep-anarchy     ≤ 2¹¹    none     any group member          1 membership π
+  sep-oneonone    exactly  none     nobody — immutable        (no update)
+                  2
+  sep-democracy   ≤ 2¹¹    no       K-of-N admin quorum,      K admin πs
+                           separate hidden member counts;     batched in 1 π
+                           tier     count delta only
+  sep-oligarchy   ≤ 2¹¹    ≤ 32     K-of-N admin quorum,      K admin πs
+                                    hidden member + admin     batched in 1 π
+                                    counts; admin tree
+                                    fully hidden post-create
+  sep-tyranny     ≤ 2¹¹    1        single pinned admin       single admin π
+                           (fixed)  with cross-group
+                                    unlinkability
 ```
 
-## Flavor model
+```
+                       FLAVOR MODEL
+                       ════════════
 
-Each flavor in this repo produces **independent Soroban contracts** — different addresses on-chain, different proof shapes, different VKs. Contracts within a flavor share a single `verifier/` crate; the trait definitions in `traits/` keep entrypoint signatures uniform across flavors so client code can target any address by the same calling convention.
+  Each flavor is an independent Soroban contract suite — different
+  addresses on-chain, different proof shapes, different VK bytes.
+  Group state does NOT migrate across flavors; flavor is a deployment-
+  time choice. The `traits/` crate keeps the public Soroban call shape
+  uniform so clients don't branch on it.
 
-There is **no in-place migration** between flavors: a group created against the PLONK contracts cannot move to the (future) PQ contracts. Flavor is a deployment-time choice.
+         ┌─────────────────────────────────────────────────┐
+         │   traits/    shared Error / DataKey /           │
+         │              entrypoint signatures              │
+         └────────────────────┬────────────────────────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              │               │               │
+              ▼               ▼               ▼
+     ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+     │   plonk/     │ │     pq/      │ │    ffi/      │
+     │              │ │              │ │              │
+     │  TurboPlonk  │ │ post-quantum │ │  alternative │
+     │  + BLS12-381 │ │ (planned —   │ │  SNARK       │
+     │  + EF KZG    │ │  STARK or    │ │  (planned)   │
+     │    2023 SRS  │ │  lattice-    │ │              │
+     │    n=32 768  │ │  based)      │ │              │
+     │              │ │              │ │              │
+     │  ┌─────────┐ │ │              │ │              │
+     │  │verifier │ │ │              │ │              │
+     │  └────┬────┘ │ │              │ │              │
+     │       │ ×5  │ │              │ │              │
+     │  ┌────┴────┐ │ │              │ │              │
+     │  │ sep-*  │ │ │              │ │              │
+     │  │ (5)    │ │ │              │ │              │
+     │  └─────────┘ │ │              │ │              │
+     │  tests/      │ │              │ │              │
+     │   fixtures/  │ │              │ │              │
+     └──────────────┘ └──────────────┘ └──────────────┘
+        TODAY            PLANNED          PLANNED
+```
+
+```
+                       RELEASE FLOW
+                       ════════════
+
+      git tag v*.*.*                          Stellar testnet
+              │                              ┌──────────────┐
+              ▼                              │              │
+      ┌─────────────────────┐                │   live RPC   │
+      │  .github/workflows/ │                │              │
+      │  release.yml        │                └──────┬───────┘
+      └──────┬──────────────┘                       │
+             │                                      │ (deploy +
+   ┌─────────┴─────────────┐                        │  invoke
+   │                       │                        │  per op)
+   │ 5 × build (parallel)  │                        │
+   │   stellar-expert/     │                        │
+   │   soroban-build-      │                        │
+   │   workflow            │                        │
+   │   ↓                   │                        │
+   │ source-attested       │                        │
+   │ WASMs registered      │                        │
+   │ under home_domain     │                        │
+   │ 'onym.chat' →         │                        │
+   │ stellar.expert        │                        │
+   │ contract pages link   │                        │
+   │ back to this tag      │                        │
+   │                       │                        │
+   └────────┬──────────────┘                        │
+            │ (needs: all 5)                        │
+            ▼                                       │
+   ┌─────────────────────────────────────┐          │
+   │ bench-gas job                       │          │
+   │   scripts/bench-gas/run.sh ────────────────────┘
+   │   ↓
+   │   per-op fees (real WASM, captured  │
+   │   from `stellar tx fetch fee`)      │
+   │   ↓                                 │
+   │   render → markdown table           │
+   │   ↓                                 │
+   │   overwrite GitHub release body     │
+   └─────────────────────────────────────┘
+              │
+              ▼
+       Release page carries:
+         • 5 source-attested WASM assets
+         • per-contract testnet gas table
+         • stellar.expert addresses for each deployment
+```
+
+```
+                       LAYOUT
+                       ══════
+
+  onym-contracts/
+  ├── README.md                    (this file)
+  ├── LICENSE
+  ├── traits/                      shared Soroban interface types
+  │   └── Cargo.toml               (placeholder; populated when PQ
+  │                                 flavor lands)
+  ├── plonk/                       TurboPlonk + EF KZG flavor (today)
+  │   ├── verifier/                on-chain verifier crate
+  │   │                            (Soroban-portable, BLS12-381 host
+  │   │                             fns)
+  │   ├── sep-anarchy/    + README + tests + test_snapshots/
+  │   ├── sep-democracy/  + README + tests + test_snapshots/
+  │   ├── sep-oligarchy/  + README + tests + test_snapshots/
+  │   ├── sep-oneonone/   + README + tests + test_snapshots/
+  │   ├── sep-tyranny/    + README + tests + test_snapshots/
+  │   └── tests/fixtures/          baked VK + canonical proof + PI
+  │                                 byte fixtures (committed)
+  ├── pq/                          (planned)
+  ├── ffi/                         (planned)
+  ├── scripts/bench-gas/           testnet gas-cost bench driver
+  │   ├── run.sh                   orchestrator
+  │   ├── setup.sh                 identity, friendbot, builds
+  │   ├── lib.sh                   encoding, deploy, fee capture
+  │   ├── render.py                JSONL → markdown table
+  │   └── contracts/sep-*.sh       per-contract drivers
+  └── .github/workflows/
+      ├── release.yml              tag push → 5× source-attested
+      │                            build + bench-gas
+      └── pr.yml                   per-flavor build+test on PRs
+```
 
 ## Build
 
-Each contract is its own Cargo crate. From a contract directory:
+Each contract is its own Cargo crate (`rust-toolchain.toml` pins 1.91.0,
+matching `soroban-sdk = "=26.0.0-rc.1"`). From a contract directory:
 
 ```
 cargo build --release --target wasm32v1-none
 ```
 
-Or use the upstream stellar-expert build workflow (what `release.yml` runs on tag push).
+Tests:
+
+```
+cargo test --lib
+```
+
+Or use the upstream `stellar-expert/soroban-build-workflow` action — that's
+what `release.yml` invokes on tag push, with source-code attestation under
+`home_domain: 'onym.chat'`.
 
 ## Testnet gas bench
 
-`scripts/bench-gas/run.sh` deploys each contract to Stellar testnet and measures per-op fees via simulation. Triggered automatically on tag push (see `release.yml`); the rendered table replaces the GitHub release body.
+`scripts/bench-gas/run.sh` deploys each contract to Stellar testnet and
+measures per-op fees via `stellar contract invoke`. Triggered automatically
+on tag push from `release.yml` after the build matrix completes; the
+rendered table replaces the GitHub release body.
 
-## Source-code attestation
+## Per-contract
 
-`release.yml`'s contract-build jobs delegate to `stellar-expert/soroban-build-workflow`, which registers the WASM build under `home_domain: 'onym.chat'`. Each deployed contract page on stellar.expert links back to the source tag in this repo.
+Read each contract's `README.md` for the full sk → π → on-chain flow with
+ASCII Merkle walk-throughs and per-circuit constraint dumps:
+
+- [`plonk/sep-anarchy/`](plonk/sep-anarchy/README.md) — single-signer membership
+- [`plonk/sep-oneonone/`](plonk/sep-oneonone/README.md) — immutable two-party
+- [`plonk/sep-democracy/`](plonk/sep-democracy/README.md) — K-of-N quorum + count delta
+- [`plonk/sep-oligarchy/`](plonk/sep-oligarchy/README.md) — K-of-N + admin tree + count delta
+- [`plonk/sep-tyranny/`](plonk/sep-tyranny/README.md) — single-admin + cross-group unlinkability
 
 ## Provenance
 
-Contract crates were extracted from the [`stellar-mls`](https://github.com/rinat-enikeev/stellar-mls) monorepo as the migration to a stand-alone contracts repo. Until the prover side splits too, fixtures are regenerated via a path-dep on `stellar-mls` during local development; the committed `*.bin` files in `plonk/verifier/tests/fixtures/` are the canonical artifacts CI consumes.
+Contract crates were extracted from the [`stellar-mls`](https://github.com/rinat-enikeev/stellar-mls)
+monorepo. Until the prover side splits too, fixtures are regenerated via a
+path-dep on `stellar-mls` during local development; the committed `*.bin`
+files in `plonk/verifier/tests/fixtures/` are the canonical artifacts CI
+consumes.
