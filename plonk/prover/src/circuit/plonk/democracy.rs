@@ -44,13 +44,23 @@
 //!      - `|member_count_new - member_count_old| ≤ 1`, encoded as
 //!        `(diff)(diff-1)(diff+1) = 0` over Fr.
 //!
-//!     **Scope of the delta.** This binds only the *scalar count*, not
-//!     the *tree*. `member_root_new` is a free witness — an active
-//!     quorum can rotate to any new root as long as the count delta
-//!     stays in `{-1, 0, +1}`. A tree-level single-leaf delta proof
-//!     (the new root differs from the old by exactly one leaf at
-//!     `leaf_idx_target`) is deferred to a follow-up; the contract
-//!     surface and PI shape are stable for the upgrade.
+//!     **Scope of the delta — by design (issue #13).** This binds
+//!     only the *scalar count*, not the *tree*. `member_root_new` is
+//!     a free witness — an active quorum can rotate to any new root
+//!     as long as the count delta stays in `{-1, 0, +1}`. A
+//!     tree-level single-leaf delta proof (the new root differs from
+//!     the old by exactly one leaf at `leaf_idx_target`) is
+//!     **intentionally not enforced**: K-of-N quorum is the design's
+//!     authorization model, and a valid quorum is entitled to
+//!     multi-leaf rotations in a single update (a vote to "swap out
+//!     half the membership" is a legitimate governance action).
+//!     Forcing single-leaf granularity would require N sequential
+//!     proofs per bulk roster change — friction without security
+//!     benefit, since a compromised quorum is compromised once
+//!     regardless of granularity. The original Groth16 reference's
+//!     tree-level constraint was a copy from a single-signer threat
+//!     model that doesn't apply here. See onymchat/onym-contracts#13
+//!     for the trade-off rationale.
 //!
 //!     **Count range.** `member_count_*` field elements are *not*
 //!     range-checked in-circuit. Soundness for u64 semantics relies on
@@ -74,8 +84,10 @@
 //!    distinctness is. Strict ordering (canonicalisation) is a
 //!    follow-up — distinctness alone is sufficient to prevent the
 //!    duplicate-leaf double-count attack at K_MAX=2.
-//!  - **Tree-level single-leaf delta.** Not enforced; only the count
-//!    delta is. See constraint 2.
+//!  - ~~**Tree-level single-leaf delta.**~~ **Closed by design (issue #13)** —
+//!    moved out of the TODOs list. K-of-N quorum is the
+//!    authorization model; multi-leaf rotations under quorum are
+//!    intentional. See constraint 2's "Scope of the delta" note.
 //!  - **K_MAX = 2.** Caps quorum size at 2 signers in this PR.
 //!    Raising to 3+ is straightforward but inflates the circuit
 //!    (extra Merkle opening per slot); keeping K_MAX small ensures
