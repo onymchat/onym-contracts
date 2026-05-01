@@ -62,6 +62,10 @@ const LEDGER_BUMP: u32 = 518_400;
 const MAX_GROUPS_PER_TIER: u32 = 10_000;
 
 const MEMBERSHIP_PI_COUNT: u32 = 2;
+/// `(commitment, epoch=0, occupancy_commitment_initial)` — the
+/// democracy-create circuit binds the initial occupancy in-circuit
+/// (issue #5 fix). Distinct from membership's 2-PI shape.
+const CREATE_PI_COUNT: u32 = 3;
 const UPDATE_PI_COUNT: u32 = 6;
 
 #[cfg(test)]
@@ -74,12 +78,31 @@ fn tier_capacity(tier: u32) -> u32 {
     }
 }
 
-const VK_MEMBERSHIP_D5: &[u8] =
-    include_bytes!("../../verifier/tests/fixtures/vk-d5.bin");
-const VK_MEMBERSHIP_D8: &[u8] =
-    include_bytes!("../../verifier/tests/fixtures/vk-d8.bin");
-const VK_MEMBERSHIP_D11: &[u8] =
-    include_bytes!("../../verifier/tests/fixtures/vk-d11.bin");
+// Per-tier democracy-create VKs (issue #5). The new 3-level chain
+// `c = Poseidon(Poseidon(Poseidon(member_root, 0), salt), occ)` matches
+// what `democracy-update-vk-d{N}` consumes at update time. Switching
+// `create_group` from the anarchy-shape standard membership VK
+// (2-level chain without occ binding) to these closes the lineage gap
+// that left freshly-created groups bricked from update_commitment.
+const VK_DEMO_CREATE_D5: &[u8] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-create-vk-d5.bin");
+const VK_DEMO_CREATE_D8: &[u8] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-create-vk-d8.bin");
+const VK_DEMO_CREATE_D11: &[u8] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-create-vk-d11.bin");
+
+// Per-tier democracy-membership VKs (issue #5). Members proving against
+// the c stored at create time need the same 3-level chain shape — the
+// standard 2-level membership VK would reject any post-fix democracy
+// commitment. Wire-PI shape `(commitment, epoch)` is byte-identical to
+// the standard membership VK so contract-side `MEMBERSHIP_PI_COUNT`
+// stays at 2; the occupancy_commitment stays a private witness.
+const VK_DEMO_MEMBERSHIP_D5: &[u8] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-membership-vk-d5.bin");
+const VK_DEMO_MEMBERSHIP_D8: &[u8] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-membership-vk-d8.bin");
+const VK_DEMO_MEMBERSHIP_D11: &[u8] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-membership-vk-d11.bin");
 
 const VK_DEMO_UPDATE_D5: &[u8] =
     include_bytes!("../../verifier/tests/fixtures/democracy-update-vk-d5.bin");
@@ -93,9 +116,18 @@ const SRS_G2: &[u8; G2_COMPRESSED_LEN] =
 
 fn membership_vk_for_tier(tier: u32) -> Option<&'static [u8]> {
     match tier {
-        0 => Some(VK_MEMBERSHIP_D5),
-        1 => Some(VK_MEMBERSHIP_D8),
-        2 => Some(VK_MEMBERSHIP_D11),
+        0 => Some(VK_DEMO_MEMBERSHIP_D5),
+        1 => Some(VK_DEMO_MEMBERSHIP_D8),
+        2 => Some(VK_DEMO_MEMBERSHIP_D11),
+        _ => None,
+    }
+}
+
+fn create_vk_for_tier(tier: u32) -> Option<&'static [u8]> {
+    match tier {
+        0 => Some(VK_DEMO_CREATE_D5),
+        1 => Some(VK_DEMO_CREATE_D8),
+        2 => Some(VK_DEMO_CREATE_D11),
         _ => None,
     }
 }
@@ -286,13 +318,22 @@ impl SepDemocracyContract {
         if !is_canonical_fr(&occupancy_commitment_initial) {
             return Err(Error::InvalidCommitmentEncoding);
         }
-        if public_inputs.len() != MEMBERSHIP_PI_COUNT {
+        // Issue #5: PI shape is now 3 fields — `(commitment, epoch=0,
+        // occupancy_commitment_initial)`. The democracy-create circuit
+        // binds occ_initial in-circuit so a future
+        // `update_commitment`'s `occ_old_pi == state.occupancy_commitment`
+        // check rests on a value the proof endorsed at create, not on
+        // a free witness.
+        if public_inputs.len() != CREATE_PI_COUNT {
             return Err(Error::PublicInputsMismatch);
         }
         if public_inputs.get(0).unwrap() != commitment {
             return Err(Error::PublicInputsMismatch);
         }
         if public_inputs.get(1).unwrap() != be32_from_u64(&env, 0) {
+            return Err(Error::PublicInputsMismatch);
+        }
+        if public_inputs.get(2).unwrap() != occupancy_commitment_initial {
             return Err(Error::PublicInputsMismatch);
         }
         if Self::group_exists(&env, &group_id) {
@@ -309,7 +350,7 @@ impl SepDemocracyContract {
         }
 
         Self::check_proof_replay(&env, &proof)?;
-        let vk = membership_vk_for_tier(tier).ok_or(Error::InvalidTier)?;
+        let vk = create_vk_for_tier(tier).ok_or(Error::InvalidTier)?;
         verify_plonk_proof(&env, vk, &proof, &public_inputs)?;
         Self::record_proof(&env, &proof);
 
