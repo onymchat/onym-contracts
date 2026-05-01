@@ -635,6 +635,69 @@ fn test_update_commitment_rejects_wrong_threshold_pi() {
     client.update_commitment(&group_id, &demo_update_proof(&env, 0), &upi);
 }
 
+/// Stale `occupancy_commitment` rejection. The democracy update PI
+/// vector binds `occ_old` (PI[3]) which the contract checks against
+/// the stored `state.occupancy_commitment`. If the prover supplies a
+/// proof bound to a different `occ_old`, the contract-side check fires
+/// before the verifier runs (#10 PublicInputsMismatch). Pins that the
+/// occupancy lineage from `create_group` carries through to update.
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_update_commitment_rejects_stale_occupancy() {
+    let (env, client, _admin) = setup_env();
+    let contract_id = client.address.clone();
+    let group_id = BytesN::from_array(&env, &[8u8; 32]);
+    let upi = pi_update(&env, 0);
+    let c_old = upi.get(0).unwrap();
+    // The canonical PI's occ_old is `upi.get(3)`; inject a *different*
+    // canonical Fr so the contract detects the mismatch.
+    let occ_in_storage = BytesN::from_array(&env, &[5u8; 32]);
+    inject_group(
+        &env,
+        &contract_id,
+        &group_id,
+        &c_old,
+        &occ_in_storage,
+        CANONICAL_THRESHOLD,
+        0,
+        CANONICAL_EPOCH,
+    );
+    client.update_commitment(&group_id, &demo_update_proof(&env, 0), &upi);
+}
+
+/// Cross-tier proof rejection. A group created at tier 0 (d5) is
+/// updated using a proof + PI bound to tier 1 (d8). The contract loads
+/// the d5 update VK based on `state.tier`, but the d8 fixture's PI
+/// vector encodes a different `c_old` than what's stored (the canonical
+/// witnesses for d5 and d8 are independent). The contract-side check
+/// fires first (#10), and even if a malicious caller forged a matching
+/// `c_old`/`epoch_old`, the PLONK verifier would then reject the
+/// d8-shaped proof under the d5 VK. This test pins the contract-side
+/// branch.
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_update_commitment_rejects_cross_tier_proof() {
+    let (env, client, _admin) = setup_env();
+    let contract_id = client.address.clone();
+    let group_id = BytesN::from_array(&env, &[9u8; 32]);
+    let d5_pi = pi_update(&env, 0);
+    let d8_pi = pi_update(&env, 1);
+    // Group is at tier 0 with d5 c_old / occ_old.
+    inject_group(
+        &env,
+        &contract_id,
+        &group_id,
+        &d5_pi.get(0).unwrap(),
+        &d5_pi.get(3).unwrap(),
+        CANONICAL_THRESHOLD,
+        0,
+        CANONICAL_EPOCH,
+    );
+    // Submit the d8 proof + d8 PI vector. PI[0] (c_old) is the d8
+    // canonical c_old, which doesn't match the d5 c_old in storage.
+    client.update_commitment(&group_id, &demo_update_proof(&env, 1), &d8_pi);
+}
+
 // ---- Queries ----
 
 #[test]

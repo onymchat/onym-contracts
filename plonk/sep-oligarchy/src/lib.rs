@@ -16,13 +16,27 @@
 //! `admin_threshold_numerator` is contract-supplied at update time
 //! and never on the wire.
 //!
-//! ## Status — simplified initial port
+//! ## In-circuit constraints
 //!
-//! The PLONK ports at `circuit::plonk::oligarchy` preserve the
-//! public-input shapes of the originals but reduce in-circuit
-//! semantics to commitment binding. The full Groth16 reference
-//! enforced K-of-N admin quorum + single-leaf delta + admin-tree
-//! membership; those constraints are flagged for a follow-up PR.
+//! Post PRs [#205](https://github.com/onymchat/onym-contracts/pull/205),
+//! [#207](https://github.com/onymchat/onym-contracts/pull/207),
+//! [#214](https://github.com/onymchat/onym-contracts/pull/214) and
+//! [#218](https://github.com/onymchat/onym-contracts/pull/218) the
+//! oligarchy circuits enforce all the constraints the original
+//! Groth16 reference did:
+//!
+//!   * **K-of-N admin quorum** — `update_commitment` decomposes
+//!     `admin_threshold_numerator` into 2 bits and verifies K active
+//!     admin signatures (`K = threshold + slack`, `K ≤ K_MAX = 2`).
+//!   * **Count delta** — `|count_new − count_old| ≤ 1` is gated
+//!     in-circuit; the member tree itself is hidden so a single
+//!     update can rotate the root freely subject to the count gate.
+//!   * **Admin-tree membership** — admin signatures bind to leaves
+//!     of the admin Merkle tree committed at `create_group`. The
+//!     admin tree (depth 5, fixed) is fully hidden post-create.
+//!
+//! No follow-up scope remains for the in-circuit gates; the Status
+//! disclaimer in earlier drafts of this docstring is obsolete.
 
 #![no_std]
 use soroban_sdk::{
@@ -92,14 +106,23 @@ const VK_UPDATE: &[u8] =
 const SRS_G2: &[u8; G2_COMPRESSED_LEN] =
     include_bytes!("../../verifier/tests/fixtures/srs-g2-compressed.bin");
 
-fn membership_vk_for_tier(tier: u32) -> Option<&'static [u8]> {
+/// Membership VK + expected FFT domain size per tier. Pinning the
+/// size at the call site lets `verify_plonk_proof` reject a fixture
+/// whose `domain_size` header drifts from the baker's pin.
+fn membership_vk_for_tier(tier: u32) -> Option<(&'static [u8], u64)> {
     match tier {
-        0 => Some(VK_MEMBERSHIP_D5),
-        1 => Some(VK_MEMBERSHIP_D8),
-        2 => Some(VK_MEMBERSHIP_D11),
+        0 => Some((VK_MEMBERSHIP_D5, 8192)),
+        1 => Some((VK_MEMBERSHIP_D8, 8192)),
+        2 => Some((VK_MEMBERSHIP_D11, 16384)),
         _ => None,
     }
 }
+
+/// Oligarchy create / update VKs are single-tier (admin tree fixed
+/// at depth 5). Domain sizes are pinned per circuit, not per member
+/// tier.
+const CREATE_VK_DOMAIN_SIZE: u64 = 4096;
+const UPDATE_VK_DOMAIN_SIZE: u64 = 16384;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -288,7 +311,7 @@ impl SepOligarchyContract {
         }
 
         Self::check_proof_replay(&env, &proof)?;
-        verify_plonk_proof(&env, VK_CREATE, &proof, &public_inputs)?;
+        verify_plonk_proof(&env, VK_CREATE, CREATE_VK_DOMAIN_SIZE, &proof, &public_inputs)?;
         Self::record_proof(&env, &proof);
 
         let timestamp = env.ledger().timestamp();
@@ -369,7 +392,7 @@ impl SepOligarchyContract {
         }
 
         Self::check_proof_replay(&env, &proof)?;
-        verify_plonk_proof(&env, VK_UPDATE, &proof, &public_inputs)?;
+        verify_plonk_proof(&env, VK_UPDATE, UPDATE_VK_DOMAIN_SIZE, &proof, &public_inputs)?;
         Self::record_proof(&env, &proof);
 
         let timestamp = env.ledger().timestamp();
@@ -417,8 +440,9 @@ impl SepOligarchyContract {
         if public_inputs.get(1).unwrap() != be32_from_u64(&env, state.epoch) {
             return Err(Error::PublicInputsMismatch);
         }
-        let vk = membership_vk_for_tier(state.tier).ok_or(Error::InvalidTier)?;
-        match verify_plonk_proof(&env, vk, &proof, &public_inputs) {
+        let (vk, expected_domain) =
+            membership_vk_for_tier(state.tier).ok_or(Error::InvalidTier)?;
+        match verify_plonk_proof(&env, vk, expected_domain, &proof, &public_inputs) {
             Ok(()) => Ok(true),
             Err(Error::InvalidProof) => Ok(false),
             Err(other) => Err(other),
@@ -573,10 +597,14 @@ const _: () = {
 fn verify_plonk_proof(
     env: &Env,
     vk_bytes: &[u8],
+    expected_domain_size: u64,
     proof: &BytesN<1601>,
     public_inputs: &Vec<BytesN<32>>,
 ) -> Result<(), Error> {
     let parsed_vk = parse_vk_bytes(vk_bytes).map_err(|_| Error::InvalidProof)?;
+    if parsed_vk.domain_size != expected_domain_size {
+        return Err(Error::InvalidProof);
+    }
     let proof_array: [u8; PROOF_LEN] = proof.to_array();
     let parsed_proof = parse_proof_bytes(&proof_array).map_err(|_| Error::InvalidProof)?;
     let n = public_inputs.len() as usize;

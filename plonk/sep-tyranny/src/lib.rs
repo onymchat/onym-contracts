@@ -81,29 +81,32 @@ const VK_UPDATE_D11: &[u8] =
 const SRS_G2: &[u8; G2_COMPRESSED_LEN] =
     include_bytes!("../../verifier/tests/fixtures/srs-g2-compressed.bin");
 
-fn membership_vk_for_tier(tier: u32) -> Option<&'static [u8]> {
+/// VK + expected FFT domain size per tier. Pinning the size at the
+/// call site lets `verify_plonk_proof` reject a fixture whose
+/// `domain_size` header drifts away from the baker's per-circuit pin.
+fn membership_vk_for_tier(tier: u32) -> Option<(&'static [u8], u64)> {
     match tier {
-        0 => Some(VK_MEMBERSHIP_D5),
-        1 => Some(VK_MEMBERSHIP_D8),
-        2 => Some(VK_MEMBERSHIP_D11),
+        0 => Some((VK_MEMBERSHIP_D5, 8192)),
+        1 => Some((VK_MEMBERSHIP_D8, 8192)),
+        2 => Some((VK_MEMBERSHIP_D11, 16384)),
         _ => None,
     }
 }
 
-fn create_vk_for_tier(tier: u32) -> Option<&'static [u8]> {
+fn create_vk_for_tier(tier: u32) -> Option<(&'static [u8], u64)> {
     match tier {
-        0 => Some(VK_CREATE_D5),
-        1 => Some(VK_CREATE_D8),
-        2 => Some(VK_CREATE_D11),
+        0 => Some((VK_CREATE_D5, 8192)),
+        1 => Some((VK_CREATE_D8, 8192)),
+        2 => Some((VK_CREATE_D11, 16384)),
         _ => None,
     }
 }
 
-fn update_vk_for_tier(tier: u32) -> Option<&'static [u8]> {
+fn update_vk_for_tier(tier: u32) -> Option<(&'static [u8], u64)> {
     match tier {
-        0 => Some(VK_UPDATE_D5),
-        1 => Some(VK_UPDATE_D8),
-        2 => Some(VK_UPDATE_D11),
+        0 => Some((VK_UPDATE_D5, 8192)),
+        1 => Some((VK_UPDATE_D8, 16384)),
+        2 => Some((VK_UPDATE_D11, 16384)),
         _ => None,
     }
 }
@@ -328,8 +331,8 @@ impl SepTyrannyContract {
         }
 
         Self::check_proof_replay(&env, &proof)?;
-        let vk = create_vk_for_tier(tier).ok_or(Error::InvalidTier)?;
-        verify_plonk_proof(&env, vk, &proof, &public_inputs)?;
+        let (vk, expected_domain) = create_vk_for_tier(tier).ok_or(Error::InvalidTier)?;
+        verify_plonk_proof(&env, vk, expected_domain, &proof, &public_inputs)?;
         Self::record_proof(&env, &proof);
 
         let timestamp = env.ledger().timestamp();
@@ -415,8 +418,9 @@ impl SepTyrannyContract {
         }
 
         Self::check_proof_replay(&env, &proof)?;
-        let vk = update_vk_for_tier(current.tier).ok_or(Error::InvalidTier)?;
-        verify_plonk_proof(&env, vk, &proof, &public_inputs)?;
+        let (vk, expected_domain) =
+            update_vk_for_tier(current.tier).ok_or(Error::InvalidTier)?;
+        verify_plonk_proof(&env, vk, expected_domain, &proof, &public_inputs)?;
         Self::record_proof(&env, &proof);
 
         let timestamp = env.ledger().timestamp();
@@ -463,8 +467,9 @@ impl SepTyrannyContract {
             return Err(Error::PublicInputsMismatch);
         }
 
-        let vk = membership_vk_for_tier(state.tier).ok_or(Error::InvalidTier)?;
-        match verify_plonk_proof(&env, vk, &proof, &public_inputs) {
+        let (vk, expected_domain) =
+            membership_vk_for_tier(state.tier).ok_or(Error::InvalidTier)?;
+        match verify_plonk_proof(&env, vk, expected_domain, &proof, &public_inputs) {
             Ok(()) => Ok(true),
             Err(Error::InvalidProof) => Ok(false),
             Err(other) => Err(other),
@@ -644,10 +649,14 @@ const MAX_PI_COUNT: usize = 5;
 fn verify_plonk_proof(
     env: &Env,
     vk_bytes: &[u8],
+    expected_domain_size: u64,
     proof: &BytesN<1601>,
     public_inputs: &Vec<BytesN<32>>,
 ) -> Result<(), Error> {
     let parsed_vk = parse_vk_bytes(vk_bytes).map_err(|_| Error::InvalidProof)?;
+    if parsed_vk.domain_size != expected_domain_size {
+        return Err(Error::InvalidProof);
+    }
     let proof_array: [u8; PROOF_LEN] = proof.to_array();
     let parsed_proof = parse_proof_bytes(&proof_array).map_err(|_| Error::InvalidProof)?;
 

@@ -64,10 +64,16 @@ const PI_COUNT: u32 = 2;
 const MEMBERSHIP_VK: &[u8] =
     include_bytes!("../../verifier/tests/fixtures/vk-d5.bin");
 
+/// FFT domain size baked into `MEMBERSHIP_VK`. Pinned at the call
+/// site as a defence-in-depth check against fixture drift.
+const MEMBERSHIP_VK_DOMAIN_SIZE: u64 = 8192;
+
 /// 1v1-specific create VK. Enforces "exactly 2 non-zero leaves at
 /// founding" inside the witness; same 2-PI shape as Membership.
 const CREATE_VK: &[u8] =
     include_bytes!("../../verifier/tests/fixtures/oneonone-create-vk.bin");
+
+const CREATE_VK_DOMAIN_SIZE: u64 = 8192;
 
 const SRS_G2: &[u8; G2_COMPRESSED_LEN] =
     include_bytes!("../../verifier/tests/fixtures/srs-g2-compressed.bin");
@@ -253,7 +259,7 @@ impl SepOneOnOneContract {
         }
 
         Self::check_proof_replay(&env, &proof)?;
-        verify_plonk_proof(&env, CREATE_VK, &proof, &public_inputs)?;
+        verify_plonk_proof(&env, CREATE_VK, CREATE_VK_DOMAIN_SIZE, &proof, &public_inputs)?;
         Self::record_proof(&env, &proof);
 
         let timestamp = env.ledger().timestamp();
@@ -313,7 +319,13 @@ impl SepOneOnOneContract {
         if public_inputs.get(1).unwrap() != be32_from_u64(&env, state.epoch) {
             return Err(Error::PublicInputsMismatch);
         }
-        match verify_plonk_proof(&env, MEMBERSHIP_VK, &proof, &public_inputs) {
+        match verify_plonk_proof(
+            &env,
+            MEMBERSHIP_VK,
+            MEMBERSHIP_VK_DOMAIN_SIZE,
+            &proof,
+            &public_inputs,
+        ) {
             Ok(()) => Ok(true),
             Err(_) => Ok(false),
         }
@@ -392,10 +404,14 @@ const MAX_PI_COUNT: usize = 2;
 fn verify_plonk_proof(
     env: &Env,
     vk_bytes: &[u8],
+    expected_domain_size: u64,
     proof: &BytesN<1601>,
     public_inputs: &Vec<BytesN<32>>,
 ) -> Result<(), Error> {
     let parsed_vk = parse_vk_bytes(vk_bytes).map_err(|_| Error::InvalidProof)?;
+    if parsed_vk.domain_size != expected_domain_size {
+        return Err(Error::InvalidProof);
+    }
     let proof_array: [u8; PROOF_LEN] = proof.to_array();
     let parsed_proof = parse_proof_bytes(&proof_array).map_err(|_| Error::InvalidProof)?;
 
