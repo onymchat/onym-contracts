@@ -705,6 +705,38 @@ fn test_update_commitment_does_not_mutate_admin_pubkey_commitment() {
     assert_eq!(post_admin, admin_comm);
 }
 
+/// Continuous admin re-proof: every `update_commitment` must carry
+/// an `admin_pubkey_commitment` PI matching what was stored at
+/// `create_group`. Pre-fix, the audit flagged that nothing pinned
+/// the admin across an update — a prover with a different secret key
+/// could advance the group if the verifier alone gated on
+/// `Poseidon(sk)`. This test injects a group with admin_comm `A`,
+/// supplies a PI vector with admin_comm `B ≠ A`, and confirms the
+/// contract-side check rejects with `PublicInputsMismatch` before
+/// the verifier runs.
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_update_commitment_rejects_stale_admin_pubkey() {
+    let (env, client, _admin) = setup_env();
+    let contract_id = client.address.clone();
+    let group_id = canonical_group_id(&env);
+    let upi = pi_update(&env, 0);
+    let c_old = upi.get(0).unwrap();
+    // Inject with a *different* admin commitment than the one bound
+    // into the canonical PI vector (`upi.get(3)`).
+    let other_admin = BytesN::from_array(&env, &[7u8; 32]);
+    inject_group(
+        &env,
+        &contract_id,
+        &group_id,
+        &c_old,
+        &other_admin,
+        0,
+        CANONICAL_EPOCH,
+    );
+    client.update_commitment(&group_id, &proof_for_tier(&env, 0, "update"), &upi);
+}
+
 // ================================================================
 // 4. Queries
 // ================================================================

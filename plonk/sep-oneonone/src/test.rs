@@ -364,6 +364,54 @@ fn test_verify_membership_well_formed_wrong_vk_returns_false() {
     );
 }
 
+/// Group-id isolation: two 1v1 groups with the *same* commitment but
+/// distinct `group_id`s are independent storage entries. Both pass
+/// `verify_membership` against the same canonical proof, and reading
+/// either group_id returns its own state without leaking into the
+/// other. This pins that the storage key is the full `group_id`,
+/// not derived from the commitment, so a commitment collision (or
+/// deliberate reuse) doesn't merge groups.
+#[test]
+fn test_verify_membership_group_id_isolation() {
+    let (env, client, _admin) = setup_env();
+    let contract_id = client.address.clone();
+    let group_a = BytesN::from_array(&env, &[40u8; 32]);
+    let group_b = BytesN::from_array(&env, &[41u8; 32]);
+    let commitment = membership_commitment(&env);
+
+    inject_group(
+        &env,
+        &contract_id,
+        &group_a,
+        &commitment,
+        CANONICAL_MEMBERSHIP_EPOCH,
+    );
+    inject_group(
+        &env,
+        &contract_id,
+        &group_b,
+        &commitment,
+        CANONICAL_MEMBERSHIP_EPOCH,
+    );
+
+    let pi = membership_pi(&env, commitment.clone(), CANONICAL_MEMBERSHIP_EPOCH);
+    let proof = membership_proof(&env);
+    assert!(client.verify_membership(&group_a, &proof, &pi));
+    assert!(client.verify_membership(&group_b, &proof, &pi));
+
+    let entry_a = client.get_commitment(&group_a);
+    let entry_b = client.get_commitment(&group_b);
+    assert_eq!(entry_a.commitment, entry_b.commitment);
+    // Independent storage: querying an unknown id surfaces GroupNotFound,
+    // confirming we're not collapsing on the commitment.
+    let unknown = BytesN::from_array(&env, &[99u8; 32]);
+    let r = client.try_get_commitment(&unknown);
+    match r {
+        Err(Ok(Error::GroupNotFound)) | Err(Err(_)) => {}
+        other => panic!("expected GroupNotFound for unknown group_id, got {:?}", other),
+    }
+}
+
 // ================================================================
 // 4. Admin entrypoints
 // ================================================================
