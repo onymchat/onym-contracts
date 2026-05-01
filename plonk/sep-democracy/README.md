@@ -235,18 +235,19 @@ single-signer fallback (an SRS-budget constraint, see Notes).
   (`K * 100 ≥ threshold_numerator · member_count`) requires a
   wider range gate + a multiplicative constraint and is deferred
   alongside the K_MAX > 2 work.
-- **Create-side gaps (DO NOT SHIP user-visible)** per the contract's
-  module-level "Status — simplified initial port" docstring:
-   - `create_group` reuses anarchy's 2-PI membership VK, so
-     `occupancy_commitment_initial` is **not bound by the proof to
-     the committed `c`**. A caller can supply any canonical Fr as the
-     initial occupancy commitment; from that point forward
-     `update_commitment`'s `occ_old_pi == state.occupancy_commitment`
-     check rests on a value the prover chose freely at create time.
-   - The simplified create's commitment chain is 2-level
-     (`Poseidon(Poseidon(root, 0), salt)`, anarchy-shape) while
-     `update_commitment` expects 3-level (`...occ_old`). Those
-     don't match for a freshly-created group's stored `c`, which
-     means a real `create_group → update_commitment` lineage isn't
-     end-to-end tested today. Same class of bug as `sep-oligarchy`'s
-     pre-#214 state; tracked for the same fix pattern.
+- **Create lineage** (issue
+  [#5](https://github.com/onymchat/onym-contracts/issues/5), closed
+  by PR
+  [#11](https://github.com/onymchat/onym-contracts/pull/11)):
+  `create_group` routes through per-tier `democracy-create-vk-d{N}`
+  with a 3-PI shape `(commitment, epoch=0, occupancy_commitment_initial)`.
+  PI[2] is bound in-circuit, so `update_commitment`'s
+  `occ_old_pi == state.occupancy_commitment` check rests on a value
+  the proof endorsed at create — not a value the prover chose freely.
+  The 3-level commitment chain
+  `c = Poseidon(Poseidon(Poseidon(member_root, 0), salt), occ)` is
+  byte-identical-shape across `create_group`, `verify_membership`
+  (`democracy-membership-vk-d{N}` with `occupancy_commitment` as a
+  private witness), and `update_commitment`
+  (`democracy-update-vk-d{N}`, 6-PI), so the create → update / create
+  → verify lineage is end-to-end consistent.

@@ -540,6 +540,41 @@ fn test_update_commitment_rejects_replayed_proof() {
     client.update_commitment(&group_id, &proof, &update_pi(&env));
 }
 
+/// Replay defence across an epoch advance. The first call uses the
+/// canonical update fixture to advance epoch 1234 → 1235 and records
+/// the proof hash. The second call constructs a fresh PI vector that
+/// matches the post-update state (so the contract-level PI check
+/// passes), but reuses the same proof bytes — `ProofReplay` fires
+/// before the verifier is reached, regardless of what `c_new` the
+/// caller picks. Pins that the global nullifier set survives an
+/// epoch transition.
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")]
+fn test_update_commitment_rejects_replay_after_successful_update() {
+    let (env, client, _admin) = setup_env();
+    let contract_id = client.address.clone();
+    let group_id = BytesN::from_array(&env, &[16u8; 32]);
+    inject_group(
+        &env,
+        &contract_id,
+        &group_id,
+        &update_c_old(&env),
+        0,
+        0,
+        CANONICAL_EPOCH,
+    );
+
+    client.update_commitment(&group_id, &update_proof(&env), &update_pi(&env));
+    let post = client.get_commitment(&group_id);
+    assert_eq!(post.epoch, CANONICAL_EPOCH + 1);
+
+    let mut replay_pi = Vec::new(&env);
+    replay_pi.push_back(post.commitment.clone());
+    replay_pi.push_back(be32_from_u64(&env, post.epoch));
+    replay_pi.push_back(canonical_zero(&env));
+    client.update_commitment(&group_id, &update_proof(&env), &replay_pi);
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #6)")]
 fn test_update_commitment_rejects_inactive_group() {

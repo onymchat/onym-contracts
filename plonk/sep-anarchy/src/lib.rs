@@ -119,22 +119,26 @@ const UPDATE_VK_D11: &[u8] =
 const SRS_G2: &[u8; G2_COMPRESSED_LEN] =
     include_bytes!("../../verifier/tests/fixtures/srs-g2-compressed.bin");
 
-/// Look up the membership VK for `tier` ∈ {0,1,2}.
-fn membership_vk_for_tier(tier: u32) -> Option<&'static [u8]> {
+/// Look up the membership VK + expected FFT domain size for
+/// `tier` ∈ {0,1,2}. The domain size is the constraint count rounded
+/// up to the next power of 2; pinning it lets the contract reject a
+/// fixture whose `domain_size` header diverges from what was baked.
+fn membership_vk_for_tier(tier: u32) -> Option<(&'static [u8], u64)> {
     match tier {
-        0 => Some(VK_D5),
-        1 => Some(VK_D8),
-        2 => Some(VK_D11),
+        0 => Some((VK_D5, 8192)),
+        1 => Some((VK_D8, 8192)),
+        2 => Some((VK_D11, 16384)),
         _ => None,
     }
 }
 
-/// Look up the update VK for `tier` ∈ {0,1,2}.
-fn update_vk_for_tier(tier: u32) -> Option<&'static [u8]> {
+/// Look up the update VK + expected FFT domain size for
+/// `tier` ∈ {0,1,2}.
+fn update_vk_for_tier(tier: u32) -> Option<(&'static [u8], u64)> {
     match tier {
-        0 => Some(UPDATE_VK_D5),
-        1 => Some(UPDATE_VK_D8),
-        2 => Some(UPDATE_VK_D11),
+        0 => Some((UPDATE_VK_D5, 8192)),
+        1 => Some((UPDATE_VK_D8, 8192)),
+        2 => Some((UPDATE_VK_D11, 16384)),
         _ => None,
     }
 }
@@ -400,8 +404,9 @@ impl SepAnarchyContract {
 
         Self::check_proof_replay(&env, &proof)?;
 
-        let vk_bytes = membership_vk_for_tier(tier).ok_or(Error::InvalidTier)?;
-        verify_plonk_proof(&env, vk_bytes, &proof, &public_inputs)?;
+        let (vk_bytes, expected_domain) =
+            membership_vk_for_tier(tier).ok_or(Error::InvalidTier)?;
+        verify_plonk_proof(&env, vk_bytes, expected_domain, &proof, &public_inputs)?;
 
         Self::record_proof(&env, &proof);
 
@@ -490,8 +495,9 @@ impl SepAnarchyContract {
 
         Self::check_proof_replay(&env, &proof)?;
 
-        let vk_bytes = update_vk_for_tier(current.tier).ok_or(Error::InvalidTier)?;
-        verify_plonk_proof(&env, vk_bytes, &proof, &public_inputs)?;
+        let (vk_bytes, expected_domain) =
+            update_vk_for_tier(current.tier).ok_or(Error::InvalidTier)?;
+        verify_plonk_proof(&env, vk_bytes, expected_domain, &proof, &public_inputs)?;
 
         Self::record_proof(&env, &proof);
 
@@ -557,8 +563,9 @@ impl SepAnarchyContract {
             return Err(Error::PublicInputsMismatch);
         }
 
-        let vk_bytes = membership_vk_for_tier(state.tier).ok_or(Error::InvalidTier)?;
-        match verify_plonk_proof(&env, vk_bytes, &proof, &public_inputs) {
+        let (vk_bytes, expected_domain) =
+            membership_vk_for_tier(state.tier).ok_or(Error::InvalidTier)?;
+        match verify_plonk_proof(&env, vk_bytes, expected_domain, &proof, &public_inputs) {
             Ok(()) => Ok(true),
             Err(Error::InvalidProof) => Ok(false),
             Err(other) => Err(other),
@@ -736,10 +743,20 @@ const _: () = {
 fn verify_plonk_proof(
     env: &Env,
     vk_bytes: &[u8],
+    expected_domain_size: u64,
     proof: &BytesN<1601>,
     public_inputs: &Vec<BytesN<32>>,
 ) -> Result<(), Error> {
     let parsed_vk = parse_vk_bytes(vk_bytes).map_err(|_| Error::InvalidProof)?;
+    // Defense-in-depth: the prover-side baker pins each VK's
+    // `domain_size` to a per-circuit constant; if the embedded
+    // fixture bytes ever drift to a different power-of-two, the
+    // verifier would still pairing-check honestly, but against
+    // the wrong constraint system. Reject early so the failure
+    // mode is `InvalidProof` rather than a corrupted trust root.
+    if parsed_vk.domain_size != expected_domain_size {
+        return Err(Error::InvalidProof);
+    }
 
     let proof_array: [u8; PROOF_LEN] = proof.to_array();
     let parsed_proof = parse_proof_bytes(&proof_array).map_err(|_| Error::InvalidProof)?;
