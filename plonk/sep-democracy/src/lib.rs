@@ -27,6 +27,24 @@
 //! 2 membership verification remains available for read-only checks, but
 //! tier-2 create/update is rejected until a real d11 quorum update circuit
 //! replaces the simplified fallback.
+//!
+//! ## Intentional design choices (NOT gaps)
+//!
+//!   - **Tree-level single-leaf delta is intentionally not
+//!     enforced for quorum-enabled tiers** (issue #13). The update
+//!     circuit binds the count delta `|count_new - count_old| ≤ 1`
+//!     but `member_root_new` is a free witness — a valid quorum can
+//!     rotate to any new root in a single update. Because tier-2
+//!     create/update is disabled, every enabled update tier that relies
+//!     on this choice enforces K-of-N quorum. See the prover-side
+//!     module's "Scope of the delta" docstring for the trade-off
+//!     rationale.
+//!   - **`create_group` occupancy binding** (closed by issue #5,
+//!     PR #11): `democracy-create-vk-d{N}` now verifies a 3-PI
+//!     vector and PI[2] (`occupancy_commitment_initial`) is
+//!     validated against the contract argument before the verifier
+//!     runs. Earlier drafts of this docstring flagged occupancy as
+//!     prover-chosen; that's no longer true.
 
 #![no_std]
 use soroban_sdk::{
