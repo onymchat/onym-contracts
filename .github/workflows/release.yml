@@ -32,7 +32,7 @@ jobs:
     uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
     with:
       release_name: ${{ github.ref_name }}
-      relative_path: '["plonk/sep-anarchy"]'
+      relative_path: 'plonk/sep-anarchy'
       package: 'sep-anarchy-contract'
       home_domain: 'onym.chat'
     secrets:
@@ -42,7 +42,7 @@ jobs:
     uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
     with:
       release_name: ${{ github.ref_name }}
-      relative_path: '["plonk/sep-democracy"]'
+      relative_path: 'plonk/sep-democracy'
       package: 'sep-democracy-contract'
       home_domain: 'onym.chat'
     secrets:
@@ -52,7 +52,7 @@ jobs:
     uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
     with:
       release_name: ${{ github.ref_name }}
-      relative_path: '["plonk/sep-oligarchy"]'
+      relative_path: 'plonk/sep-oligarchy'
       package: 'sep-oligarchy-contract'
       home_domain: 'onym.chat'
     secrets:
@@ -62,7 +62,7 @@ jobs:
     uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
     with:
       release_name: ${{ github.ref_name }}
-      relative_path: '["plonk/sep-oneonone"]'
+      relative_path: 'plonk/sep-oneonone'
       package: 'sep-oneonone-contract'
       home_domain: 'onym.chat'
     secrets:
@@ -72,7 +72,7 @@ jobs:
     uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
     with:
       release_name: ${{ github.ref_name }}
-      relative_path: '["plonk/sep-tyranny"]'
+      relative_path: 'plonk/sep-tyranny'
       package: 'sep-tyranny-contract'
       home_domain: 'onym.chat'
     secrets:
