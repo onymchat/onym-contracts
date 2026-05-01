@@ -1,8 +1,24 @@
 name: PR Build
 
-# Per-flavor build + test on PRs. The `release.yml` workflow (tag push)
-# does the source-attested build for stellar.expert; this one is the
-# faster CI signal during development.
+# Per-flavor build + test on PRs. The `release.yml` workflow (manual
+# dispatch) does the source-attested build for stellar.expert; this
+# one is the faster CI signal during development.
+#
+# Three matrix jobs:
+#   - plonk-contracts:  per-contract `cargo test --lib` + wasm32 build
+#   - plonk-verifier:   on-chain verifier crate `cargo test`
+#   - plonk-prover:     prover-side fixture-assert run. Without
+#                       STELLAR_REGEN_FIXTURES=1, the test re-bakes
+#                       VKs + canonical proofs and byte-compares them
+#                       against the committed `.bin` fixtures consumed
+#                       by `plonk/verifier/`. Any drift between the
+#                       prover and the on-chain bytes — including a
+#                       per-tier VK SHA-256 anchor change — fails the
+#                       build immediately.
+#
+# Third-party `uses:` are pinned to commit SHA (with the version tag
+# in a trailing comment for human + Dependabot readability) so a
+# tag-rewrite on those repos can't inject code into our CI runs.
 
 on:
   pull_request:
@@ -30,15 +46,15 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           targets: wasm32v1-none
 
       - name: Cache Rust build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
         with:
           path: |
             ~/.cargo/registry
@@ -61,15 +77,15 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           targets: wasm32v1-none
 
       - name: Cache Rust build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
         with:
           path: |
             ~/.cargo/registry
@@ -80,3 +96,37 @@ jobs:
       - name: cargo test
         working-directory: plonk/verifier
         run: cargo test
+
+  plonk-prover:
+    name: plonk / prover (fixture assert)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Intentionally NOT setting RUSTUP_TOOLCHAIN — the prover crate's
+    # rust-toolchain.toml pins 1.88.0 and rustup auto-installs that
+    # channel on first cargo invocation. The contract crates override
+    # to stable because stellar-cli v26 blocklists 1.91.0; the prover
+    # has no such constraint.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        # `stable` here just gets rustup onto the runner; rustup then
+        # honors plonk/prover/rust-toolchain.toml and pulls 1.88.0.
+
+      - name: Cache Rust build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            plonk/prover/target
+          key: pr-prover-${{ hashFiles('plonk/prover/Cargo.toml', 'plonk/prover/src/circuit/plonk/baker.rs', 'plonk/verifier/tests/fixtures/**') }}
+
+      - name: Assert fixtures match (no STELLAR_REGEN_FIXTURES)
+        working-directory: plonk/prover
+        # Without the env var, this test re-bakes per-tier VKs and
+        # canonical proofs from the prover and byte-compares them to
+        # the committed fixtures in plonk/verifier/tests/fixtures/.
+        # Drift = build failure. README.md documents this contract.
+        run: cargo test --release --lib plonk_verifier_fixtures_match_or_regenerate
