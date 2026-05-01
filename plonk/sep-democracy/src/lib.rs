@@ -20,35 +20,17 @@
 //! can distinguish two groups with different thresholds. On-wire
 //! threshold privacy is not a property of this design.
 //!
-//! ## Status — simplified initial port (DO NOT SHIP user-visible)
+//! ## Tier status
 //!
-//! Two security-load-bearing gaps live in this PR; both are tracked
-//! for follow-up before any mainnet/testnet promotion:
-//!
-//!   1. **Update circuit (`circuit::plonk::democracy`)**: binds
-//!      occupancy commitments + threshold into the commitment
-//!      derivation but does NOT yet enforce the K-of-N quorum +
-//!      single-leaf-delta constraints from the Groth16 reference.
-//!      Any single member with one secret_key can therefore
-//!      construct a valid update — `update_commitment` does not
-//!      enforce democratic semantics on its own.
-//!   2. **`create_group`**: reuses anarchy's 2-PI membership VK, so
-//!      `occupancy_commitment_initial` is NOT bound by the proof to
-//!      the committed `c`. A caller can supply any canonical Fr as
-//!      the initial occupancy commitment; from that point forward
-//!      `update_commitment`'s `occ_old_pi == current.occupancy_
-//!      commitment` check rests on a value the prover chose freely
-//!      at create.
-//!
-//! The contract's verification path is structurally complete; full
-//! quorum semantics + occupancy binding at create land in a follow-up
-//! PR. See the prover-side module's "Status — simplified initial
-//! port" docstring.
+//! Tier 0/1 create and update route through democracy-specific VKs that
+//! bind the 3-level commitment chain and enforce the K-of-N quorum. Tier
+//! 2 membership verification remains available for read-only checks, but
+//! tier-2 create/update is rejected until a real d11 quorum update circuit
+//! replaces the simplified fallback.
 
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype,
-    crypto::bls12_381::Fr,
+    contract, contracterror, contractevent, contractimpl, contracttype, crypto::bls12_381::Fr,
     Address, Bytes, BytesN, Env, Vec,
 };
 
@@ -60,6 +42,11 @@ const HISTORY_WINDOW: u32 = 64;
 const LEDGER_THRESHOLD: u32 = 17_280;
 const LEDGER_BUMP: u32 = 518_400;
 const MAX_GROUPS_PER_TIER: u32 = 10_000;
+// d11 democracy updates currently use a simplified single-signer fallback
+// circuit. Keep the large membership VK available for verification, but
+// do not allow new large democracy groups or large democracy updates until
+// a real d11 quorum circuit lands.
+const MAX_DEMOCRACY_QUORUM_TIER: u32 = 1;
 
 const MEMBERSHIP_PI_COUNT: u32 = 2;
 /// `(commitment, epoch=0, occupancy_commitment_initial)` — the
@@ -309,7 +296,7 @@ impl SepDemocracyContract {
             }
         }
 
-        if tier > 2 {
+        if tier > MAX_DEMOCRACY_QUORUM_TIER {
             return Err(Error::InvalidTier);
         }
         if threshold_numerator < 1 || threshold_numerator > 100 {
@@ -411,6 +398,9 @@ impl SepDemocracyContract {
         if !current.active {
             return Err(Error::GroupInactive);
         }
+        if current.tier > MAX_DEMOCRACY_QUORUM_TIER {
+            return Err(Error::InvalidTier);
+        }
         let new_epoch = current.epoch.checked_add(1).ok_or(Error::InvalidEpoch)?;
 
         if public_inputs.len() != UPDATE_PI_COUNT {
@@ -501,10 +491,7 @@ impl SepDemocracyContract {
         }
     }
 
-    pub fn get_commitment(
-        env: Env,
-        group_id: BytesN<32>,
-    ) -> Result<CommitmentEntry, Error> {
+    pub fn get_commitment(env: Env, group_id: BytesN<32>) -> Result<CommitmentEntry, Error> {
         Self::require_initialized(&env)?;
         Self::load_group(&env, &group_id)
     }
@@ -590,11 +577,7 @@ impl SepDemocracyContract {
 
     fn check_proof_replay(env: &Env, proof: &BytesN<1601>) -> Result<(), Error> {
         let hash = Self::proof_hash(env, proof);
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::UsedProof(hash))
-        {
+        if env.storage().persistent().has(&DataKey::UsedProof(hash)) {
             return Err(Error::ProofReplay);
         }
         Ok(())
@@ -605,9 +588,11 @@ impl SepDemocracyContract {
         env.storage()
             .persistent()
             .set(&DataKey::UsedProof(hash.clone()), &true);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::UsedProof(hash), LEDGER_THRESHOLD, LEDGER_BUMP);
+        env.storage().persistent().extend_ttl(
+            &DataKey::UsedProof(hash),
+            LEDGER_THRESHOLD,
+            LEDGER_BUMP,
+        );
     }
 
     fn archive_entry(env: &Env, group_id: &BytesN<32>, entry: &CommitmentEntry) {

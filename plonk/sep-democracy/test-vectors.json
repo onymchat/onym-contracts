@@ -44,7 +44,7 @@
   },
 
   "tier": {
-    "description": "Tier index → tree depth → leaf capacity (per-tier bitmap slot count, NOT the per-tier group cap). The contract MUST reject `tier > 2` with `InvalidTier`. Per-tier slot capacity is the total in-tree slot space (cumulative-joins ceiling per design §4.1's tombstone-permanence rule). Pinned by `tier_capacity()` in the contract; orthogonal to the cross-group `MAX_GROUPS_PER_TIER` cap (see `create_group_validation` rules).",
+    "description": "Tier index → tree depth → leaf capacity (per-tier bitmap slot count, NOT the per-tier group cap). Tier 2 capacity is retained for read-only membership verification of existing state, but create_group and update_commitment reject tier 2 until a real d11 quorum circuit lands. Per-tier slot capacity is the total in-tree slot space (cumulative-joins ceiling per design §4.1's tombstone-permanence rule). Pinned by `tier_capacity()` in the contract; orthogonal to the cross-group `MAX_GROUPS_PER_TIER` cap (see `create_group_validation` rules).",
     "vectors": [
       { "tier": 0, "name": "Small", "depth": 5, "capacity": 32 },
       { "tier": 1, "name": "Medium", "depth": 8, "capacity": 256 },
@@ -86,7 +86,7 @@
   "create_group_validation": {
     "description": "Per-call validation in `create_group`. Single-type contract — no per-type dispatch. Threshold must be present (this is Democracy) and in [1, 100].",
     "rules": [
-      "tier ∈ {0, 1, 2}; out of range → InvalidTier",
+      "tier ∈ {0, 1}; tier 2 and out-of-range values → InvalidTier",
       "threshold_numerator ∈ [1, 100]; out of range → InvalidThreshold",
       "group_id MUST NOT already be assigned to a live or inactive group; collision → GroupAlreadyExists",
       "commitment and occupancy_commitment_initial MUST be canonical Fr encodings (Fr::from_bytes ∘ Fr::to_bytes round-trip); non-canonical → InvalidCommitmentEncoding",

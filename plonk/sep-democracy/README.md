@@ -2,8 +2,9 @@
 
 Per-type **private group** on Soroban with **K-of-N admin quorum** + hidden
 member counts (an occupancy commitment) + a configurable threshold. Update
-authorization is in-circuit at tier 0/1; tier 2 falls back to a simplified
-single-signer circuit (an SRS-budget constraint, see Notes).
+authorization is in-circuit at tier 0/1. Tier 2 is currently disabled for
+create/update because its d=11 update circuit is only a simplified
+single-signer fallback (an SRS-budget constraint, see Notes).
 
 ```
                   SEP-DEMOCRACY  —  K-of-N → π flow
@@ -95,12 +96,13 @@ single-signer circuit (an SRS-budget constraint, see Notes).
    │   2 scalars              │    │          occ_old, occ_new,   │
    │                          │    │          threshold)          │
    │   • caller.require_auth  │    │   6 scalars                  │
-   │   • tier ≤ 2             │    │                              │
+   │   • tier ≤ 1             │    │                              │
    │   • threshold ∈ [1,100]  │    │   • NO require_auth          │
    │     (contract level —    │    │     (proof IS the auth)      │
-   │     CIRCUIT enforces     │    │   • c_old == state.commitment│
-   │     ≤ K_MAX = 2 in the   │    │   • ep_old == BE(state.epoch)│
-   │     quorum branch)       │    │   • canonical Fr(c_new)      │
+   │     CIRCUIT enforces     │    │   • state.tier ≤ 1           │
+   │     ≤ K_MAX = 2 in the   │    │   • c_old == state.commitment│
+   │     quorum branch)       │    │   • ep_old == BE(state.epoch)│
+   │                          │    │   • canonical Fr(c_new)      │
    │   • canonical Fr(comm)   │    │   • canonical Fr(occ_new)    │
    │   • canonical Fr(occ)    │    │   • occ_old == state.occ     │
    │   • PI[0] == comm arg    │    │   • threshold == BE(         │
@@ -193,9 +195,9 @@ single-signer circuit (an SRS-budget constraint, see Notes).
 
    tier 0 (Small)   d = 5    capacity 2⁵  =   32    quorum circuit ✓
    tier 1 (Medium)  d = 8    capacity 2⁸  =  256    quorum circuit ✓
-   tier 2 (Large)   d = 11   capacity 2¹¹ = 2048    SIMPLIFIED FALLBACK
-                                                    (no in-circuit
-                                                     K-of-N quorum)
+   tier 2 (Large)   d = 11   capacity 2¹¹ = 2048    DISABLED for create/update
+                                                    (fallback has no
+                                                     in-circuit K-of-N quorum)
 ```
 
 ## Notes
@@ -211,14 +213,15 @@ single-signer circuit (an SRS-budget constraint, see Notes).
   sep-anarchy. A 2-level commitment chain matches the on-chain
   representation read-back path; quorum semantics are an
   update-time-only concern.
-- **Tier 2 fallback (issue [#204](../../../onym-contracts/issues/204))**: the K-of-N quorum circuit at depth 11
+- **Tier 2 disabled for create/update (issue [#12](https://github.com/onymchat/onym-contracts/issues/12))**: the K-of-N quorum circuit at depth 11
   blows the n=32,768 SRS ceiling. Under the EF KZG 2023 ceremony's
-  published sizes there's no n=65,536 SRS to consume, so tier-2
-  groups verify against the simplified single-signer circuit instead
-  — `update_commitment` at d=11 is structurally compatible (same PI
-  shape, same VK position) but does **not** in-circuit-enforce the
-  quorum gate. Tier-2 admin authorization rests on off-chain trust
-  until further notice.
+  published sizes there's no n=65,536 SRS to consume, so tier-2 updates
+  would have to verify against the simplified single-signer circuit
+  instead. Because that circuit does **not** in-circuit-enforce the
+  quorum gate, `create_group` and `update_commitment` reject tier 2
+  until a real d11 quorum circuit lands. `verify_membership` still keeps
+  the d11 membership VK available for read-only verification of any
+  already-existing tier-2 state.
 - **Threshold range mismatch**: the contract validates
   `threshold_numerator ∈ [1, 100]` (a percentage), but the quorum
   circuit's 2-bit range gate constrains it to `[0, 3]` — practical

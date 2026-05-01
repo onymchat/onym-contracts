@@ -2,7 +2,7 @@
 # sep-democracy gas bench driver (V2).
 #
 # Coverage:
-#   deploy, set_restricted_mode, plus per-tier (d=5/8/11):
+#   deploy, set_restricted_mode, plus enabled quorum tiers (d=5/8):
 #     create_group (uses MEMBERSHIP_VK — gen-membership-proof works),
 #     verify_membership (same fresh proof + state).
 #
@@ -11,6 +11,8 @@
 #   specific update circuit. `gen-update-proof` produces proofs for
 #   the generic update circuit (used by sep-anarchy), not for the
 #   democracy variant. Needs a `gen-democracy-update-proof` binary.
+#   tier 2 / d=11 — contract rejects create/update until a real d11
+#   K-of-N quorum circuit exists.
 
 set -euo pipefail
 
@@ -74,7 +76,6 @@ run_tier() {
 run_tier 0 5
 if [ "${BENCH_FULL_TIERS:-1}" = "1" ]; then
     run_tier 1 8
-    run_tier 2 11
 fi
 
 echo "==> [$BENCH_CURRENT_CONTRACT] set_restricted_mode(true)"
