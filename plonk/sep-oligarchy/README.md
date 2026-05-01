@@ -280,14 +280,18 @@ enforcement in-circuit. The most security-load-bearing of the five contracts.
 - **`verify_membership` does not burn the nullifier.** Read-only by
   design — same proof bytes can be re-presented for offline
   attestation by a verifier who doesn't trust the chain RPC.
-- **Threshold range mismatch**: contract validates
-  `admin_threshold_numerator ∈ [1, 100]` (intended as percentage),
-  but the quorum circuit's 2-bit slack/threshold range gates cap it
-  at `K_MAX = 2`. Calls with `threshold > K_MAX` pre-validate at the
-  contract boundary but fail in-circuit at `verify_plonk_proof`,
-  surfaced as `Error::InvalidProof`. Same divergence as
-  `sep-democracy`; the percentage semantics need a wider range gate
-  + the multiplicative `100·K ≥ threshold·N` constraint.
+- **Threshold is absolute, not percentage** (issue #15). The
+  contract validates `admin_threshold_numerator ∈ [1, K_MAX = 2]`,
+  matching the deployed quorum circuit's 2-bit slack/threshold range
+  gates. Earlier drafts of this README described the threshold as a
+  percentage in `[1, 100]`, but the v0.1.4 update circuit ships the
+  absolute-threshold gate, not the multiplicative `100·K ≥
+  threshold·N` percentage gate that interpretation would require.
+  Realistic percentages (50/67/75/100) would create groups that
+  brick on the first `update_commitment`; the tightened validation
+  closes that footgun. Promoting to a true percentage-quorum circuit
+  is follow-up work (would require widened range gates + a
+  multiplicative constraint, plus a VK rebake).
 - **Two-tree architecture**:
    - **Member tree** is per-tier (depth 5/8/11). The contract stores
      a salted occupancy commitment over the member counts; the actual

@@ -44,6 +44,20 @@ const MEMBERSHIP_PI_COUNT: u32 = 2;
 const CREATE_PI_COUNT: u32 = 6;
 const UPDATE_PI_COUNT: u32 = 6;
 
+/// Upper bound on `admin_threshold_numerator`. The update circuit
+/// range-checks the threshold into 2 bits and enforces `K = threshold
+/// + slack` with `K ≤ K_MAX = 2`, so any threshold ≥ 3 is
+/// unsatisfiable in-circuit (issue #15). Earlier drafts of the
+/// contract documented `admin_threshold_numerator` as a percentage in
+/// `[1, 100]`, but the v0.1.4 oligarchy update circuit ships an
+/// absolute threshold gate, not the percentage `100·K ≥ threshold·N`
+/// gate the percentage semantics would require. Tighten the
+/// contract-side validation to match what the deployed VK can prove,
+/// keeping the API consistent with the circuit until a percentage
+/// circuit lands. See `plonk/prover/src/circuit/plonk/oligarchy.rs`
+/// "Threshold semantics" docstring for the trade-off.
+const OLIGARCHY_K_MAX: u32 = 2;
+
 #[cfg(test)]
 fn tier_capacity(tier: u32) -> u32 {
     match tier {
@@ -239,7 +253,7 @@ impl SepOligarchyContract {
         if member_tier > 2 {
             return Err(Error::InvalidTier);
         }
-        if admin_threshold_numerator < 1 || admin_threshold_numerator > 100 {
+        if admin_threshold_numerator < 1 || admin_threshold_numerator > OLIGARCHY_K_MAX {
             return Err(Error::InvalidThreshold);
         }
         if !is_canonical_fr(&commitment) {

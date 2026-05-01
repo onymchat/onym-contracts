@@ -26,7 +26,7 @@
       { "name": "InvalidCommitmentEncoding", "code": 15 },
       { "name": "InvalidPoint", "code": 26 },
       { "name": "GroupStillActive", "code": 27 },
-      { "name": "InvalidThreshold", "code": 28, "note": "create_oligarchy_group rejects admin_threshold_numerator < 1 || > 100; per design v0.1.4 §4.7.6" },
+      { "name": "InvalidThreshold", "code": 28, "note": "create_oligarchy_group rejects admin_threshold_numerator < 1 || > OLIGARCHY_K_MAX (= 2). Earlier drafts described this as a percentage check `[1, 100]` per design v0.1.4 §4.7.6, but the deployed update circuit caps threshold at K_MAX = 2 via a 2-bit range gate; values ≥ 3 are unsatisfiable in-circuit and would brick the group on first `update_commitment`. The contract-side gate now matches the VK (issue #15)." },
       { "name": "InvalidInitialMembership", "code": 30, "note": "Reserved slot in the error number-space for symmetry with the prover-side `BelowMinMember` / `BelowMinAdmin` errors per design §4.8. The contract does NOT surface this code: circuit-level rejections from in-circuit popcount floors collapse to `InvalidProof=7` at the contract boundary (the contract has no Poseidon host and cannot recompute floors itself). Reserved purely as a placeholder so a future revision that promotes the floor check to contract-side enforcement (e.g., if the design grows a separate `member_count_initial` / `admin_count_initial` wire field) has a stable error code waiting." }
     ],
     "dropped_from_sep_xxxx": [
@@ -98,10 +98,10 @@
   },
 
   "create_oligarchy_group_validation": {
-    "description": "Per-call validation in `create_oligarchy_group`. Single-type contract — no per-type dispatch. admin_threshold_numerator must be present and in [1, 100].",
+    "description": "Per-call validation in `create_oligarchy_group`. Single-type contract — no per-type dispatch. admin_threshold_numerator must be present and in [1, OLIGARCHY_K_MAX] where K_MAX = 2 (the deployed update circuit's 2-bit range gate; see InvalidThreshold note for the issue #15 history).",
     "rules": [
       "member_tier ∈ {0, 1, 2}; out of range → InvalidTier",
-      "admin_threshold_numerator ∈ [1, 100]; out of range → InvalidThreshold",
+      "admin_threshold_numerator ∈ [1, OLIGARCHY_K_MAX = 2]; out of range → InvalidThreshold (issue #15: tightened from the earlier-documented [1, 100] percentage range to match the absolute-threshold update circuit)",
       "group_id MUST NOT already be assigned to a live or inactive group; collision → GroupAlreadyExists",
       "commitment, occupancy_commitment_initial, member_root, admin_root, salt_initial MUST all be canonical Fr encodings (Fr::from_bytes ∘ Fr::to_bytes round-trip); non-canonical → InvalidCommitmentEncoding",
       "GroupCount(member_tier) MUST be < MAX_GROUPS_PER_TIER (10000); exceeded → TierGroupLimitReached",

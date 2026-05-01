@@ -260,6 +260,33 @@ fn test_create_rejects_invalid_threshold() {
     );
 }
 
+/// Issue #15: the v0.1.4 update circuit caps threshold at K_MAX = 2
+/// (2-bit range gate; values ≥ 3 are unsatisfiable). Earlier drafts
+/// of this contract accepted `admin_threshold_numerator ∈ [1, 100]`
+/// per a documented percentage interpretation that the circuit
+/// doesn't actually implement, so realistic percentages (50, 67, 75,
+/// 100) created groups that bricked on the first `update_commitment`.
+/// The fix tightens the validation to match what the VK can prove:
+/// `[1, OLIGARCHY_K_MAX = 2]`. This test pins the new upper boundary.
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")]
+fn test_create_rejects_threshold_above_k_max() {
+    let (env, client, _admin) = setup_env();
+    let c = caller(&env);
+    let z = canonical_zero(&env);
+    let pi = pi_membership(&env, 0);
+    client.create_oligarchy_group(
+        &c,
+        &BytesN::from_array(&env, &[1u8; 32]),
+        &z,
+        &0u32,
+        &3u32, // K_MAX = 2 → 3 is the first unsatisfiable threshold
+        &z,
+        &malformed_proof(&env),
+        &pi,
+    );
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #28)")]
 fn test_create_rejects_threshold_zero() {
