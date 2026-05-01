@@ -1,21 +1,27 @@
 name: Release Contracts
 
 # On tag push:
-#   1. The five `sep-*` jobs build each contract WASM via the
-#      `stellar-expert/soroban-build-workflow` action, which:
-#        - publishes the WASM as a release asset, and
-#        - registers source-code attestation against the GitHub repo +
-#          tag so stellar.expert can show the source-of-record link
-#          on each contract page (gated on `home_domain: 'onym.chat'`).
-#   2. After all five contract builds finish, the `bench-gas` job
-#      deploys the freshly-tagged contracts to Stellar testnet,
-#      measures per-op fees via `stellar contract invoke --sim-only`,
-#      renders a markdown table + JSONL, and overwrites the release
-#      body with the rendered table. Raw JSONL stays on the workflow
-#      run as an artifact for downstream tooling.
+#   1. The `build-contracts` matrix job builds each of the 5 sep-*
+#      contracts to WASM with `stellar contract build --optimize` and
+#      uploads the resulting `<contract>_v<version>.wasm` files as
+#      release assets on the tag. WASMs carry the `source_repo` and
+#      `home_domain` metadata stamps via `--meta` so stellar.expert's
+#      contract page can link back to this repo + tag.
+#   2. After the matrix completes, the `bench-gas` job deploys the
+#      freshly-tagged contracts to Stellar testnet, measures per-op
+#      fees via `stellar contract invoke`, renders a markdown table
+#      + JSONL, and overwrites the release body with the rendered
+#      table. Raw JSONL stays on the workflow run as an artifact.
 #
-# Both halves run on the same tag — `v*` — so the release ends up
-# carrying both the verified WASMs and the testnet bench numbers.
+# History note: earlier drafts used `stellar-expert/soroban-build-workflow`
+# for the contract-build half, which gave us source-code attestation
+# automatically. That action pins `stellar/stellar-cli@v25.1.0`, and
+# v25.1.0 of `stellar contract build` rejects rustc 1.91.0 — but
+# `soroban-sdk = "=26.0.0-rc.1"` requires 1.91.0 as its floor. The
+# action has no override hook for the CLI version. v0.0.1 cuts that
+# knot by building manually with stellar-cli v26.0.0 (already proven
+# in the bench-gas job below) and forgoing the attestation feature
+# until the upstream action ships a v26-aware release.
 
 on:
   push:
@@ -23,71 +29,116 @@ on:
       - 'v*'
 
 permissions:
-  id-token: write
   contents: write
-  attestations: write
 
 jobs:
-  sep-anarchy:
-    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
-    with:
-      release_name: ${{ github.ref_name }}
-      relative_path: 'plonk/sep-anarchy'
-      package: 'sep-anarchy-contract'
-      home_domain: 'onym.chat'
-    secrets:
-      release_token: ${{ secrets.GITHUB_TOKEN }}
+  build-contracts:
+    name: build ${{ matrix.contract }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - contract: sep-anarchy
+            package: sep-anarchy-contract
+          - contract: sep-democracy
+            package: sep-democracy-contract
+          - contract: sep-oligarchy
+            package: sep-oligarchy-contract
+          - contract: sep-oneonone
+            package: sep-oneonone-contract
+          - contract: sep-tyranny
+            package: sep-tyranny-contract
+    env:
+      # The contract crates pin rustc 1.91.0 via per-crate
+      # `rust-toolchain.toml` (soroban-sdk 26.0.0-rc.1 floor).
+      # Setting RUSTUP_TOOLCHAIN=stable here would override that
+      # pin — leave it unset so cargo respects the per-crate file
+      # and pulls 1.91.0 on demand. stellar-cli v26.0.0 accepts
+      # 1.91.0 (which is why we left v25.1.0 behind).
+      WORK_DIR: plonk/${{ matrix.contract }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
 
-  sep-democracy:
-    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
-    with:
-      release_name: ${{ github.ref_name }}
-      relative_path: 'plonk/sep-democracy'
-      package: 'sep-democracy-contract'
-      home_domain: 'onym.chat'
-    secrets:
-      release_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
 
-  sep-oligarchy:
-    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
-    with:
-      release_name: ${{ github.ref_name }}
-      relative_path: 'plonk/sep-oligarchy'
-      package: 'sep-oligarchy-contract'
-      home_domain: 'onym.chat'
-    secrets:
-      release_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install stellar CLI
+        env:
+          # Same pin + sha256 the bench-gas job uses below. v26.0.0
+          # accepts rustc 1.91.0; v25.1.0 (the version the upstream
+          # reusable workflow pins) rejects it.
+          STELLAR_VERSION: '26.0.0'
+          STELLAR_SHA256: '31c83db342d1184b31f6591e739950eb45756be46dcd7bb57e4f38e91ea32e84'
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tarball="$tmp/stellar-cli.tar.gz"
+          curl -sSLf -o "$tarball" \
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_VERSION}/stellar-cli-${STELLAR_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${STELLAR_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xz -C "$tmp" -f "$tarball"
+          binary="$(find "$tmp" -maxdepth 3 -type f -name stellar -perm -u+x | head -1)"
+          test -n "$binary" || { echo "no stellar binary in tarball" >&2; exit 1; }
+          sudo install -m 0755 "$binary" /usr/local/bin/stellar
+          rm -rf "$tmp"
+          stellar --version
 
-  sep-oneonone:
-    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
-    with:
-      release_name: ${{ github.ref_name }}
-      relative_path: 'plonk/sep-oneonone'
-      package: 'sep-oneonone-contract'
-      home_domain: 'onym.chat'
-    secrets:
-      release_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build contract WASM
+        working-directory: ${{ env.WORK_DIR }}
+        run: |
+          set -euo pipefail
+          out="$(mktemp -d)"
 
-  sep-tyranny:
-    uses: stellar-expert/soroban-build-workflow/.github/workflows/release.yml@main
-    with:
-      release_name: ${{ github.ref_name }}
-      relative_path: 'plonk/sep-tyranny'
-      package: 'sep-tyranny-contract'
-      home_domain: 'onym.chat'
-    secrets:
-      release_token: ${{ secrets.GITHUB_TOKEN }}
+          # `--optimize` runs `stellar contract optimize` inline after
+          # the wasm32 build, matching the asset bytes the upstream
+          # reusable workflow used to produce.
+          stellar contract build \
+            --optimize \
+            --package "${{ matrix.package }}" \
+            --out-dir "$out" \
+            --meta "source_repo=github:${{ github.repository }}" \
+            --meta "home_domain=onym.chat"
+
+          # `cargo metadata` is the source of truth for the package
+          # version; bake it into the asset name so stellar.expert can
+          # pick the right WASM by tag.
+          version="$(cargo metadata --format-version=1 --no-deps \
+            | jq -r '.packages[] | select(.name == "${{ matrix.package }}") | .version')"
+          test -n "$version" || { echo "no package version" >&2; exit 1; }
+
+          # Reusable-workflow naming convention: `${package}_v${version}.wasm`.
+          # Preserved so downstream tooling that scrapes release assets
+          # keeps working across the cutover.
+          wasm_name="${{ matrix.package }}_v${version}.wasm"
+          src="$(find "$out" -maxdepth 1 -name '*.wasm' | head -1)"
+          test -n "$src" || { echo "no wasm produced in $out" >&2; ls -la "$out" >&2; exit 1; }
+          mv "$src" "${{ github.workspace }}/$wasm_name"
+          echo "WASM_PATH=${{ github.workspace }}/$wasm_name" >> "$GITHUB_ENV"
+
+      - name: Attach WASM to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: ${{ env.WASM_PATH }}
+          fail_on_unmatched_files: true
 
   bench-gas:
-    needs: [sep-anarchy, sep-democracy, sep-oligarchy, sep-oneonone, sep-tyranny]
+    needs: [build-contracts]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      # Each contract crate's `rust-toolchain.toml` pins 1.91.0 (the
-      # `=26.0.0-rc.1` `soroban-sdk` floor). The bench job builds via
-      # `cargo` directly, so let `RUSTUP_TOOLCHAIN=stable` win — the
-      # toolchain dtolnay/rust-toolchain installs below is the one
-      # `cargo` ends up using.
+      # The bench job builds the prover-side `gen-membership-proof` /
+      # `gen-update-proof` tools via `cargo` (not via stellar-cli), so
+      # we want the top-level rust-toolchain.toml's pin to NOT win —
+      # let RUSTUP_TOOLCHAIN=stable take precedence. The contract
+      # crates' per-crate rust-toolchain.toml still pins 1.91.0 for
+      # `stellar contract build`; that's a separate code path.
       RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v4
@@ -129,10 +180,6 @@ jobs:
             "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_VERSION}/stellar-cli-${STELLAR_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
           echo "${STELLAR_SHA256}  ${tarball}" | sha256sum -c -
           tar -xz -C "$tmp" -f "$tarball"
-          # Don't assume the binary lives at the tarball root — extract
-          # to a scratch dir and `install` whatever named `stellar`
-          # turned up. v26 happens to have it at the root; later releases
-          # may not.
           binary="$(find "$tmp" -maxdepth 3 -type f -name stellar -perm -u+x | head -1)"
           test -n "$binary" || { echo "no stellar binary in tarball" >&2; exit 1; }
           sudo install -m 0755 "$binary" /usr/local/bin/stellar
