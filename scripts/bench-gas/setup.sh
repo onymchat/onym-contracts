@@ -60,16 +60,22 @@ for c in sep-anarchy sep-democracy sep-oligarchy sep-oneonone sep-tyranny; do
         --out-dir "$BENCH_ARTIFACT_DIR" >/dev/null
 done
 
-# V2 prover-side tooling (`gen-membership-proof`, `gen-update-proof`)
-# lives outside this repo (in the upstream prover at github.com/
-# rinat-enikeev/stellar-mls). The V1 bench captured here uses the
-# committed canonical fixture proofs in `plonk/verifier/tests/fixtures/`
-# and doesn't generate runtime proofs, so we don't need those binaries
-# yet.
+# Runtime proof generators for the sep-anarchy chained bench
+# (`create_group → verify_membership → update_commitment`). The
+# committed canonical fixtures are baked at epoch=1234 — useful for
+# cross-platform VK fingerprinting but unusable against `create_group`,
+# which requires `PI[1] == be32(0)`. So the bench builds these two
+# binaries from the in-repo prover (`plonk/prover/`) and the driver
+# generates fresh epoch=0 proofs that chain end-to-end.
 #
-# When V2 lands (capturing real `update_commitment` / multi-tier
-# `verify_membership` revert-mode fees), this script will need to
-# either pull pre-built `gen-*-proof` binaries as a release artifact
-# from the prover repo, or add a path-dep to it during local dev.
+# sep-democracy uses the committed `democracy-{create,membership}-*-d{N}.bin`
+# fixtures directly (their canonical witnesses already use epoch=0).
+echo "==> building proof generators"
+cargo build \
+    --manifest-path "$REPO_ROOT/plonk/prover/Cargo.toml" \
+    --release \
+    --bin gen-membership-proof \
+    --bin gen-update-proof >/dev/null
+export BENCH_PROVER_BIN_DIR="$REPO_ROOT/plonk/prover/target/release"
 
 echo "==> setup complete"

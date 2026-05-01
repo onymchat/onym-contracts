@@ -9,6 +9,18 @@ publish = false
 [lib]
 crate-type = ["rlib"]
 
+# Operator CLIs for fresh on-tier proofs the bench-gas suite consumes.
+# Both vendored from rinat-enikeev/stellar-mls's `src/bin/`. Witnesses
+# the bench supplies are live (epoch=0 + canonical secret keys); the
+# baked VK is shape-only so any same-depth witness verifies under it.
+[[bin]]
+name = "gen-membership-proof"
+path = "src/bin/gen_membership_proof.rs"
+
+[[bin]]
+name = "gen-update-proof"
+path = "src/bin/gen_update_proof.rs"
+
 [dependencies]
 # --- Espresso jellyfish — TurboPlonk + jf-pcs (KZG) + jf-relation (gates). ---
 # Pinned to the SAME tags jf-plonk's own Cargo.toml uses for its transitive
