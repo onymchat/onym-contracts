@@ -65,12 +65,14 @@ read_pi_field_hex() {
 # Constants used across drivers.
 ZERO32_HEX="$(printf '%064d' 0)"
 
-# ---------- V2 proof generators ----------
+# ---------- proof generators ----------
 # Wrappers around the `gen-membership-proof` / `gen-update-proof`
-# binaries (built under `--features gen-proof-tool` by setup.sh).
-# Each call writes `proof.bin`, `proof.hex`, `commitment.hex`,
-# `public_inputs.json`, etc. into a fresh out-dir; callers consume
-# the artifacts via `bench_gen_*_load`.
+# binaries vendored at `plonk/prover/src/bin/`. setup.sh builds them
+# and exports `BENCH_PROVER_BIN_DIR` pointing at
+# `plonk/prover/target/release/`. Each call writes `proof.bin`,
+# `proof.hex`, `commitment.hex`, `public_inputs.json` etc. into a
+# fresh out-dir; callers consume the artifacts via
+# `bench_gen_proof_hex` / `bench_gen_pi_json` / `bench_gen_commitment_hex`.
 #
 # Witness defaults are baked in below — they're shape-only fixtures
 # (the VK is shape-dependent, not witness-dependent), so the same
@@ -90,7 +92,7 @@ bench_gen_membership_proof() {
     local depth="$1"
     local out_dir="$2"
     mkdir -p "$out_dir"
-    "${BENCH_REPO_ROOT}/target/release/gen-membership-proof" \
+    "${BENCH_PROVER_BIN_DIR}/gen-membership-proof" \
         --depth "$depth" \
         --epoch 0 \
         --salt "$BENCH_GEN_SALT_OLD" \
@@ -109,7 +111,7 @@ bench_gen_update_proof() {
     local depth="$1"
     local out_dir="$2"
     mkdir -p "$out_dir"
-    "${BENCH_REPO_ROOT}/target/release/gen-update-proof" \
+    "${BENCH_PROVER_BIN_DIR}/gen-update-proof" \
         --depth "$depth" \
         --epoch-old 0 \
         --salt-old "$BENCH_GEN_SALT_OLD" \
