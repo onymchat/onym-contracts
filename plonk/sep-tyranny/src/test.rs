@@ -432,6 +432,34 @@ fn test_create_group_rejects_non_canonical_admin_pubkey_commitment() {
     );
 }
 
+/// Issue #17: non-canonical `group_id` bytes feed into a non-injective
+/// Fr reduction (`group_id_to_fr`), which would let a single creator
+/// register two distinct group_ids that collide on `group_id_fr` and
+/// thereby produce identical `admin_pubkey_commitment`s for the same
+/// admin secret across both groups — weakening the README's
+/// cross-group unlinkability claim. The contract rejects non-canonical
+/// group_ids the same way it rejects non-canonical commitments.
+#[test]
+#[should_panic(expected = "Error(Contract, #15)")]
+fn test_create_group_rejects_non_canonical_group_id() {
+    let (env, client, _admin) = setup_env();
+    let c = caller(&env);
+    let pi = pi_create(&env, 0);
+    // `0xff…ff` is 2^256 - 1, well above the BLS12-381 Fr modulus, so
+    // round-trip through `Fr::from_bytes / to_bytes` does not preserve
+    // it — this is exactly the input shape the issue flags.
+    let bad_group_id = BytesN::from_array(&env, &[0xffu8; 32]);
+    client.create_group(
+        &c,
+        &bad_group_id,
+        &pi.get(0).unwrap(),
+        &0u32,
+        &pi.get(2).unwrap(),
+        &malformed_proof(&env),
+        &pi,
+    );
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #4)")]
 fn test_create_group_rejects_duplicate_group_id() {
