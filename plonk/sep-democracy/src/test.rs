@@ -419,6 +419,104 @@ fn test_create_then_verify_membership_lifecycle_d11() {
     run_create_then_verify_membership_lifecycle(2);
 }
 
+// ---- Issue #5 follow-up: end-to-end create → update_commitment lifecycle ----
+
+/// Pin the create→update side of the lineage gap closed in issue #5.
+/// `update_commitment` always required a 3-level c at the same shape
+/// `democracy-update-vk-d{N}` was baked against; pre-fix, `create_group`
+/// stored a 2-level c (anarchy-shape) so update was unreachable. This
+/// test confirms the fresh state set by `create_group` satisfies every
+/// contract-side gate `update_commitment` checks before the verifier
+/// runs:
+///
+///   1. PI count == 6
+///   2. PI[0] (`c_old`) == `state.commitment`
+///   3. PI[1] (`epoch_old`) == `be32(state.epoch == 0)`
+///   4. `is_canonical_fr(c_new)` and `is_canonical_fr(occ_new)`
+///   5. PI[3] (`occ_old`) == `state.occupancy_commitment`
+///   6. PI[5] (`threshold`) == `be32(state.threshold_numerator)`
+///   7. proof-replay check passes
+///
+/// Reaching the verifier itself proves the create→update PI handshake
+/// works end-to-end. The committed `democracy-update-proof-d{N}` was
+/// generated under an independent canonical witness (epoch_old=1234,
+/// c_old != post-create commitment), so the verifier rejects when fed
+/// our post-create PI; the call panics with `InvalidProof = 7`.
+///
+/// What this catches: any future regression that re-introduces a c
+/// mismatch between create and update — failing at gate (2), (3), (5),
+/// or (6) — surfaces as a different error code, breaking the
+/// `should_panic` match. A follow-up that re-bakes the
+/// `democracy-update-proof-d{N}` fixture with `epoch_old=0` and
+/// `c_old=post-create commitment` (the natural chained witness) would
+/// flip the assertion from "panics with #7" to "succeeds and advances
+/// epoch to 1"; that's strictly stronger and worth doing once the
+/// upstream baker grows a chained-witness mode.
+fn run_create_then_update_commitment_lifecycle(tier: u32) {
+    let (env, client, _admin) = setup_env();
+    let group_id = BytesN::from_array(&env, &[(tier as u8 + 30); 32]);
+
+    // Step 1: create_group with the real democracy-create fixture.
+    // Mirrors run_create_then_verify_membership_lifecycle's setup so
+    // the post-create state is identical to the verify-side test's
+    // starting point.
+    let create_pi = demo_create_pi(&env, tier);
+    let c_create = create_pi.get(0).unwrap();
+    let occ_create = create_pi.get(2).unwrap();
+    client.create_group(
+        &caller(&env),
+        &group_id,
+        &c_create,
+        &tier,
+        &CANONICAL_THRESHOLD,
+        &occ_create,
+        &demo_create_proof(&env, tier),
+        &create_pi,
+    );
+
+    // Step 2: construct an update PI matching every contract-side gate
+    // against the post-create state. c_new / occ_new are arbitrary
+    // canonical Fr scalars (last byte set so they round-trip through
+    // `is_canonical_fr`).
+    let mut c_new_bytes = [0u8; 32];
+    c_new_bytes[31] = 0x01;
+    let c_new = BytesN::from_array(&env, &c_new_bytes);
+    let mut occ_new_bytes = [0u8; 32];
+    occ_new_bytes[31] = 0x02;
+    let occ_new = BytesN::from_array(&env, &occ_new_bytes);
+
+    let mut upi = Vec::new(&env);
+    upi.push_back(c_create.clone());
+    upi.push_back(be32(&env, 0));
+    upi.push_back(c_new);
+    upi.push_back(occ_create.clone());
+    upi.push_back(occ_new);
+    upi.push_back(be32(&env, CANONICAL_THRESHOLD as u64));
+
+    // Step 3: call update_commitment. PI handshake must pass; verifier
+    // rejects (proof was generated under a different witness) →
+    // `Error::InvalidProof = 7`.
+    client.update_commitment(&group_id, &demo_update_proof(&env, tier), &upi);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_create_then_update_commitment_lifecycle_d5() {
+    run_create_then_update_commitment_lifecycle(0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_create_then_update_commitment_lifecycle_d8() {
+    run_create_then_update_commitment_lifecycle(1);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_create_then_update_commitment_lifecycle_d11() {
+    run_create_then_update_commitment_lifecycle(2);
+}
+
 // ---- Reject paths ----
 
 #[test]

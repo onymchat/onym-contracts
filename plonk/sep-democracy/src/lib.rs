@@ -260,22 +260,25 @@ impl SepDemocracyContract {
         Ok(())
     }
 
-    /// Create a Democracy group at epoch 0. NOTE: create uses the
-    /// shared anarchy membership VK at the matching tier (the
-    /// committed `c` is byte-identical-shape to anarchy at create).
-    /// The full Groth16 democracy create circuit's specifics (occupancy
-    /// binding at create) are not enforced here pending a per-tier
-    /// democracy-create circuit port — flagged for follow-up.
+    /// Create a Democracy group at epoch 0.
     ///
-    /// SECURITY: because the membership VK has 2 PIs (commitment, epoch),
-    /// `occupancy_commitment_initial` is NOT bound by the proof to the
-    /// committed `c` at create time. A caller may supply any canonical
-    /// Fr value as the initial occupancy commitment. From this point
-    /// forward `update_commitment`'s `occ_old_pi == current.occupancy_
-    /// commitment` check rests on a value the prover chose freely at
-    /// create. This is part of the simplified-port surface and must not
-    /// ship to anything user-visible until the per-tier democracy-create
-    /// circuit (with occupancy binding in-PI) lands.
+    /// Verifies the proof against `democracy-create-vk-d{N}` (the
+    /// per-tier democracy-create circuit) with a 3-PI vector
+    /// `(commitment, epoch=0, occupancy_commitment_initial)`. PI[2]
+    /// is validated against the contract argument before the
+    /// verifier runs, so the proof endorses
+    /// `occupancy_commitment_initial` in-circuit —
+    /// `update_commitment`'s subsequent
+    /// `occ_old_pi == current.occupancy_commitment` check rests on a
+    /// value the proof bound at create time, not a value the prover
+    /// supplied freely. The 3-level commitment chain
+    /// `c = Poseidon(Poseidon(Poseidon(member_root, 0), salt), occ)`
+    /// is byte-identical-shape across `create_group`,
+    /// `verify_membership` (`democracy-membership-vk-d{N}`, with
+    /// `occupancy_commitment` as a private witness), and
+    /// `update_commitment` (`democracy-update-vk-d{N}`, 6-PI),
+    /// closing the create→update / create→verify lineage gap that
+    /// motivated issue #5.
     pub fn create_group(
         env: Env,
         caller: Address,
