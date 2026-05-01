@@ -1,0 +1,51 @@
+[package]
+name = "onym-plonk-prover"
+version = "0.1.0"
+edition = "2021"
+description = "Off-chain TurboPlonk prover + per-tier VK baker + canonical-fixture regen for the onym-contracts sep-* family. Vendored from rinat-enikeev/stellar-mls until the upstream prover split rewires consumers."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# --- Espresso jellyfish — TurboPlonk + jf-pcs (KZG) + jf-relation (gates). ---
+# Pinned to the SAME tags jf-plonk's own Cargo.toml uses for its transitive
+# deps so Cargo resolves to a single compilation per crate. Re-verify before
+# bumping (`git ls-remote --tags`):
+#   jf-plonk-v0.8.0    (commit b33995b6)
+#   jf-pcs-v0.3.0      (commit f1538793) — what jf-plonk@0.8.0 transitively requires
+#   jf-relation-v0.5.0 (commit b33995b6)
+jf-plonk    = { git = "https://github.com/EspressoSystems/jellyfish", tag = "jf-plonk-v0.8.0",    default-features = false, features = ["std"] }
+jf-pcs      = { git = "https://github.com/EspressoSystems/jellyfish", tag = "jf-pcs-v0.3.0",      default-features = false, features = ["std", "test-srs"] }
+jf-relation = { git = "https://github.com/EspressoSystems/jellyfish", tag = "jf-relation-v0.5.0", default-features = false, features = ["std"] }
+
+# --- Arkworks 0.5.x ---
+# The vendored source uses `ark_*_v05` paths (a stellar-mls convention from
+# when arkworks 0.4 + 0.5 had to coexist for Groth16/PLONK dual-track). This
+# crate is plonk-only so 0.4 isn't needed at all, but we keep the package
+# rename so the imports resolve without rewriting ~13.8k LoC.
+ark-bls12-381-v05         = { package = "ark-bls12-381",         version = "0.5", default-features = false, features = ["curve"] }
+ark-ec-v05                = { package = "ark-ec",                version = "0.5", default-features = false, features = ["std"] }
+ark-ff-v05                = { package = "ark-ff",                version = "0.5", default-features = false, features = ["std"] }
+ark-poly-v05              = { package = "ark-poly",              version = "0.5", default-features = false, features = ["std"] }
+ark-serialize-v05         = { package = "ark-serialize",         version = "0.5", default-features = false, features = ["std"] }
+ark-std-v05               = { package = "ark-std",               version = "0.5", default-features = false, features = ["std"] }
+ark-crypto-primitives-v05 = { package = "ark-crypto-primitives", version = "0.5", default-features = false, features = ["sponge"] }
+
+# --- General utility deps. ---
+sha2 = "0.10"
+sha3 = { version = "0.10", default-features = false }
+rand = "0.8"
+rand_chacha = "0.3"
+
+[build-dependencies]
+# build.rs asserts SHA-256 of the embedded EF KZG SRS bytes against
+# `srs/expected-hash.in` so a wrong-SRS build fails to compile.
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
