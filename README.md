@@ -54,6 +54,11 @@ without branching on the underlying SNARK.
      │    n=32 768  │ │  based)      │ │              │
      │              │ │              │ │              │
      │  ┌─────────┐ │ │              │ │              │
+     │  │ prover  │ │ │              │ │              │
+     │  └────┬────┘ │ │              │ │              │
+     │       │ bake │ │              │ │              │
+     │       ▼      │ │              │ │              │
+     │  ┌─────────┐ │ │              │ │              │
      │  │verifier │ │ │              │ │              │
      │  └────┬────┘ │ │              │ │              │
      │       │ ×5   │ │              │ │              │
@@ -61,8 +66,6 @@ without branching on the underlying SNARK.
      │  │ sep-*   │ │ │              │ │              │
      │  │ (5)     │ │ │              │ │              │
      │  └─────────┘ │ │              │ │              │
-     │  tests/      │ │              │ │              │
-     │   fixtures/  │ │              │ │              │
      └──────────────┘ └──────────────┘ └──────────────┘
         TODAY            PLANNED          PLANNED
 ```
@@ -127,6 +130,10 @@ without branching on the underlying SNARK.
   │   └── Cargo.toml               (placeholder; populated when PQ
   │                                 flavor lands)
   ├── plonk/                       TurboPlonk + EF KZG flavor (today)
+  │   ├── prover/                  off-chain TurboPlonk prover +
+  │   │                             per-tier VK baker + canonical-
+  │   │                             fixture regen (vendored from
+  │   │                             rinat-enikeev/stellar-mls)
   │   ├── verifier/                on-chain verifier crate
   │   │                            (Soroban-portable, BLS12-381 host
   │   │                             fns)
@@ -190,8 +197,29 @@ ASCII Merkle walk-throughs and per-circuit constraint dumps:
 
 ## Provenance
 
-Contract crates were extracted from the [`stellar-mls`](https://github.com/rinat-enikeev/stellar-mls)
-monorepo. Until the prover side splits too, fixtures are regenerated via a
-path-dep on `stellar-mls` during local development; the committed `*.bin`
-files in `plonk/verifier/tests/fixtures/` are the canonical artifacts CI
-consumes.
+Both contract crates AND the off-chain prover were extracted from the
+[`stellar-mls`](https://github.com/rinat-enikeev/stellar-mls) monorepo;
+the prover lives at [`plonk/prover/`](plonk/prover/) and is the
+canonical source for circuit shape (per-tier VK SHA-256 anchors live
+in `circuit::plonk::baker`'s pinned constants + anchor tests).
+
+Regenerate the committed `*.bin` fixtures in `plonk/verifier/tests/fixtures/`:
+
+```
+cd plonk/prover && STELLAR_REGEN_FIXTURES=1 cargo test --release --lib \
+  plonk_verifier_fixtures_match_or_regenerate
+```
+
+Without the env var the same test runs in **assert** mode — re-bake
++ byte-compare against what's checked in. CI runs assert mode on
+every PR so any drift between the prover and the on-chain bytes
+fails the build immediately. Cross-platform clients (mobile SDKs)
+verify against the same SHA pins so a divergence here surfaces
+across all consumers.
+
+Drift-window note: the upstream stellar-mls copy of this prover
+remains in service until the kotlin / swift SDKs split out into
+their own repos and rewire to consume from this crate. During that
+window, treat this crate as the canonical source — any prover-shape
+change here must propagate upstream (or vice-versa) before the
+fixtures cut a new release.
