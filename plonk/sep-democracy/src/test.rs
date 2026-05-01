@@ -9,15 +9,12 @@ use soroban_sdk::testutils::Address as _;
 // The standard `proof-d{N}.bin` / `pi-d{N}.bin` fixtures from the
 // anarchy-shape membership circuit no longer verify against the new
 // `democracy-membership-vk-d{N}.bin` deployed by the contract.
-const PROOF_D5: &[u8; 1601] = include_bytes!(
-    "../../verifier/tests/fixtures/democracy-membership-proof-d5.bin"
-);
-const PROOF_D8: &[u8; 1601] = include_bytes!(
-    "../../verifier/tests/fixtures/democracy-membership-proof-d8.bin"
-);
-const PROOF_D11: &[u8; 1601] = include_bytes!(
-    "../../verifier/tests/fixtures/democracy-membership-proof-d11.bin"
-);
+const PROOF_D5: &[u8; 1601] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-membership-proof-d5.bin");
+const PROOF_D8: &[u8; 1601] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-membership-proof-d8.bin");
+const PROOF_D11: &[u8; 1601] =
+    include_bytes!("../../verifier/tests/fixtures/democracy-membership-proof-d11.bin");
 const PI_D5: &[u8; 64] =
     include_bytes!("../../verifier/tests/fixtures/democracy-membership-pi-d5.bin");
 const PI_D8: &[u8; 64] =
@@ -52,11 +49,11 @@ const DEMO_UPDATE_PI_D11: &[u8; 192] =
     include_bytes!("../../verifier/tests/fixtures/democracy-update-pi-d11.bin");
 
 const CANONICAL_EPOCH: u64 = 1234;
-// Matches the threshold value baked into democracy-update fixtures
-// across all three tiers. The quorum circuit at d=5/d=8 is exercised
-// non-trivially with `slack = K_MAX - threshold = 1`; the simplified
-// circuit at d=11 doesn't constrain threshold but uses the same value
-// for cross-tier consistency.
+// Matches the threshold value baked into democracy-update fixtures.
+// The quorum circuit at d=5/d=8 is exercised non-trivially with
+// `slack = K_MAX - threshold = 1`. The simplified d11 update circuit
+// remains fixture-backed for regression tests, but the contract rejects
+// large-tier updates until a real d11 quorum circuit lands.
 const CANONICAL_THRESHOLD: u32 = 1;
 
 fn membership_proof(env: &Env, tier: u32) -> BytesN<1601> {
@@ -183,12 +180,7 @@ fn demo_create_pi(env: &Env, tier: u32) -> Vec<BytesN<32>> {
     pi
 }
 
-fn inject_inactive_group(
-    env: &Env,
-    contract_id: &Address,
-    group_id: &BytesN<32>,
-    tier: u32,
-) {
+fn inject_inactive_group(env: &Env, contract_id: &Address, group_id: &BytesN<32>, tier: u32) {
     let z = canonical_zero(env);
     env.as_contract(contract_id, || {
         let entry = CommitmentEntry {
@@ -306,7 +298,8 @@ fn test_update_commitment_happy_path_d8() {
 }
 
 #[test]
-fn test_update_commitment_happy_path_d11() {
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_update_commitment_rejects_disabled_large_tier() {
     run_update_happy_path(2);
 }
 
@@ -396,8 +389,7 @@ fn run_create_then_verify_membership_lifecycle(tier: u32) {
         commitment,
         "membership PI[0] must match the c stored at create",
     );
-    let result =
-        client.verify_membership(&group_id, &membership_proof(&env, tier), &membership_pi);
+    let result = client.verify_membership(&group_id, &membership_proof(&env, tier), &membership_pi);
     assert!(
         result,
         "tier {tier} membership proof must verify against the post-create commitment",
@@ -415,13 +407,18 @@ fn test_create_then_verify_membership_lifecycle_d8() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #8)")]
 fn test_create_then_verify_membership_lifecycle_d11() {
+    // Tier 2 create/update stays disabled until a real d11 quorum circuit
+    // lands. Read-only d11 membership remains covered by
+    // test_verify_membership_happy_path_d11 via injected existing state.
     run_create_then_verify_membership_lifecycle(2);
 }
 
 // ---- Issue #5 follow-up: end-to-end create → update_commitment lifecycle ----
 
-/// Pin the create→update side of the lineage gap closed in issue #5.
+/// Pin the create→update side of the lineage gap closed in issue #5 for
+/// enabled quorum tiers.
 /// `update_commitment` always required a 3-level c at the same shape
 /// `democracy-update-vk-d{N}` was baked against; pre-fix, `create_group`
 /// stored a 2-level c (anarchy-shape) so update was unreachable. This
@@ -512,8 +509,10 @@ fn test_create_then_update_commitment_lifecycle_d8() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #7)")]
+#[should_panic(expected = "Error(Contract, #8)")]
 fn test_create_then_update_commitment_lifecycle_d11() {
+    // Tier 2 create fails before the update handoff because d11 update
+    // proofs do not yet enforce the K-of-N quorum.
     run_create_then_update_commitment_lifecycle(2);
 }
 
@@ -550,6 +549,25 @@ fn test_create_group_rejects_invalid_tier() {
         &BytesN::from_array(&env, &[1u8; 32]),
         &z,
         &3u32,
+        &50u32,
+        &z,
+        &malformed_proof(&env),
+        &pi,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_create_group_rejects_disabled_large_tier() {
+    let (env, client, _admin) = setup_env();
+    let c = caller(&env);
+    let z = canonical_zero(&env);
+    let pi = pi_membership(&env, 2);
+    client.create_group(
+        &c,
+        &BytesN::from_array(&env, &[2u8; 32]),
+        &z,
+        &2u32,
         &50u32,
         &z,
         &malformed_proof(&env),
@@ -975,7 +993,10 @@ fn test_verify_membership_inactive_group_returns_false() {
     pi.push_back(z.clone());
     pi.push_back(be32(&env, 0));
     let result = client.verify_membership(&group_id, &malformed_proof(&env), &pi);
-    assert!(!result, "malformed proof against inactive group should be Ok(false)");
+    assert!(
+        !result,
+        "malformed proof against inactive group should be Ok(false)"
+    );
 }
 
 // ---- Regression: archive + history ----
@@ -987,7 +1008,14 @@ fn test_get_history_returns_chronological_entries() {
     let group_id = BytesN::from_array(&env, &[80u8; 32]);
     let z = canonical_zero(&env);
     inject_group(
-        &env, &contract_id, &group_id, &z, &z, CANONICAL_THRESHOLD, 0, 0,
+        &env,
+        &contract_id,
+        &group_id,
+        &z,
+        &z,
+        CANONICAL_THRESHOLD,
+        0,
+        0,
     );
     env.as_contract(&contract_id, || {
         let mut history: Vec<CommitmentEntry> = Vec::new(&env);
@@ -1024,7 +1052,14 @@ fn test_archive_entry_appends_and_prunes_at_window() {
     let group_id = BytesN::from_array(&env, &[81u8; 32]);
     let z = canonical_zero(&env);
     inject_group(
-        &env, &contract_id, &group_id, &z, &z, CANONICAL_THRESHOLD, 0, 0,
+        &env,
+        &contract_id,
+        &group_id,
+        &z,
+        &z,
+        CANONICAL_THRESHOLD,
+        0,
+        0,
     );
     let total: u64 = (HISTORY_WINDOW as u64) + 6; // exceeds cap by 6
     env.as_contract(&contract_id, || {
@@ -1043,10 +1078,7 @@ fn test_archive_entry_appends_and_prunes_at_window() {
     });
     let history = client.get_history(&group_id, &(2 * HISTORY_WINDOW));
     assert_eq!(history.len(), HISTORY_WINDOW);
-    assert_eq!(
-        history.get(0).unwrap().epoch,
-        total - HISTORY_WINDOW as u64,
-    );
+    assert_eq!(history.get(0).unwrap().epoch, total - HISTORY_WINDOW as u64,);
     assert_eq!(history.get(history.len() - 1).unwrap().epoch, total - 1);
 }
 
@@ -1072,7 +1104,10 @@ fn test_vectors_consistency() {
         ("ProofReplay", Error::ProofReplay as u32),
         ("TierGroupLimitReached", Error::TierGroupLimitReached as u32),
         ("AdminOnly", Error::AdminOnly as u32),
-        ("InvalidCommitmentEncoding", Error::InvalidCommitmentEncoding as u32),
+        (
+            "InvalidCommitmentEncoding",
+            Error::InvalidCommitmentEncoding as u32,
+        ),
         ("InvalidThreshold", Error::InvalidThreshold as u32),
     ];
     for (name, code) in expected {
@@ -1131,7 +1166,9 @@ fn bench_verify_membership_at_tier(tier: u32) {
     assert!(result, "tier {tier} canonical proof should verify");
     std::eprintln!(
         "[gas-bench] sep-democracy verify_membership(tier={}): cpu={} mem={}",
-        tier, cpu, mem
+        tier,
+        cpu,
+        mem
     );
 }
 
@@ -1175,7 +1212,9 @@ fn bench_update_commitment_at_tier(tier: u32) {
 
     std::eprintln!(
         "[gas-bench] sep-democracy update_commitment(tier={}): cpu={} mem={}",
-        tier, cpu, mem
+        tier,
+        cpu,
+        mem
     );
 }
 
@@ -1187,9 +1226,4 @@ fn bench_update_commitment_d5() {
 #[test]
 fn bench_update_commitment_d8() {
     bench_update_commitment_at_tier(1);
-}
-
-#[test]
-fn bench_update_commitment_d11() {
-    bench_update_commitment_at_tier(2);
 }
