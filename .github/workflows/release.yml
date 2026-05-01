@@ -52,11 +52,14 @@ jobs:
             package: sep-tyranny-contract
     env:
       # The contract crates pin rustc 1.91.0 via per-crate
-      # `rust-toolchain.toml` (soroban-sdk 26.0.0-rc.1 floor).
-      # Setting RUSTUP_TOOLCHAIN=stable here would override that
-      # pin — leave it unset so cargo respects the per-crate file
-      # and pulls 1.91.0 on demand. stellar-cli v26.0.0 accepts
-      # 1.91.0 (which is why we left v25.1.0 behind).
+      # `rust-toolchain.toml` (soroban-sdk 26.0.0-rc.1 floor). But
+      # `stellar contract build` v26.0.0 has a hard-coded blocklist
+      # that rejects rustc 1.81 / 1.82 / 1.83 / 1.91.0 (versions known
+      # to produce broken WASM). Setting RUSTUP_TOOLCHAIN=stable wins
+      # over rust-toolchain.toml: cargo uses whatever stable is on the
+      # runner, which currently sits past 1.91.0 — outside the
+      # blocklist while still satisfying the soroban-sdk 26 floor.
+      RUSTUP_TOOLCHAIN: stable
       WORK_DIR: plonk/${{ matrix.contract }}
     steps:
       - uses: actions/checkout@v4
