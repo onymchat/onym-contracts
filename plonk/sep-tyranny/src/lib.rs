@@ -284,6 +284,18 @@ impl SepTyrannyContract {
         if !is_canonical_fr(&admin_pubkey_commitment) {
             return Err(Error::InvalidCommitmentEncoding);
         }
+        // `group_id_fr` derives from a raw 32-byte → Fr reduction, which
+        // is non-injective for non-canonical 32-byte inputs (issue #17).
+        // Without this check, a creator could pick `group_id_A` and
+        // `group_id_B = group_id_A + p` (mod 2^256), getting two distinct
+        // groups whose `group_id_fr` collide — so the same admin secret
+        // produces the same `admin_pubkey_commitment` across both,
+        // weakening the README's cross-group unlinkability claim. The
+        // creator's own ID choice is the lever; rejecting non-canonical
+        // group_ids closes the lever.
+        if !is_canonical_fr(&group_id) {
+            return Err(Error::InvalidCommitmentEncoding);
+        }
 
         let group_id_fr = group_id_to_fr(&group_id);
 

@@ -98,6 +98,7 @@
       "group_id MUST NOT already be assigned; collision → GroupAlreadyExists",
       "commitment MUST be a canonical Fr encoding; non-canonical → InvalidCommitmentEncoding",
       "admin_pubkey_commitment MUST be a canonical Fr encoding; non-canonical → InvalidCommitmentEncoding",
+      "group_id MUST be a canonical Fr encoding (issue #17); non-canonical → InvalidCommitmentEncoding. Required to keep the `group_id_fr = Fr::from_bytes(group_id) mod p` reduction injective on accepted inputs — without this gate, a creator could pick `group_id_A` and `group_id_B = group_id_A + p` and collide their `admin_pubkey_commitment` derivations.",
       "GroupCount(tier) MUST be < MAX_GROUPS_PER_TIER (10000); exceeded → TierGroupLimitReached",
       "if RestrictedMode is true: caller MUST equal Admin, else AdminOnly (caller.require_auth() runs first)",
       "public_inputs.commitment MUST equal `commitment` parameter; mismatch → PublicInputsMismatch",
