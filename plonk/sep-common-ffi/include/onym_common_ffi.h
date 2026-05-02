@@ -1,6 +1,6 @@
 // Shared mobile-FFI primitives for the onym-contracts sep-* family.
 //
-// Hand-written to match `src/lib.rs`. See `plonk/FFI-DESIGN.md` for the
+// Hand-written to match `src/lib.rs`. See `../README.md` for the
 // ABI contract — error model, byte-buffer ownership, scalar/point
 // encoding, symbol naming.
 

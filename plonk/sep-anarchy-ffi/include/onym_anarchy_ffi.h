@@ -1,13 +1,13 @@
 // Mobile-FFI for the SEP-Anarchy contract type.
 //
-// Hand-written to match `src/lib.rs`. See `plonk/FFI-DESIGN.md` for the
+// Hand-written to match `src/lib.rs`. See `../README.md` for the
 // ABI contract — error model, byte-buffer ownership, scalar/point
 // encoding. Clients link `sep-common-ffi` alongside this header for
 // `onym_byte_buffer_free` / `onym_string_free` and shared hashing
 // primitives.
 //
 // Witness inputs follow the leaf-hash + per-prover-secret-key shape
-// (see plonk/FFI-DESIGN.md): mobile callers supply public-ish leaf
+// (see ../README.md): mobile callers supply public-ish leaf
 // hashes for the full member tree plus only the prover's own secret
 // key. No other member's secret key crosses the FFI.
 

@@ -2,7 +2,7 @@
 //!
 //! Wraps the off-chain prover's hashing/serialisation primitives behind
 //! a stable C ABI consumed by `onym-sdk-swift` / `onym-sdk-kotlin`. See
-//! `plonk/FFI-DESIGN.md` for the full ABI contract — symbol naming,
+//! `../README.md` for the full ABI contract — symbol naming,
 //! byte-buffer ownership, error model, and scalar/point encoding rules
 //! pinned there are part of the public surface and must not drift.
 //!

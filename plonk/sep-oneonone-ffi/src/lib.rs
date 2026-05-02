@@ -1,7 +1,7 @@
 //! Mobile-FFI for the SEP-OneOnOne contract type.
 //!
 //! Single-tier (depth=5) two-party "founding" circuit. See
-//! `plonk/FFI-DESIGN.md` and per-crate doc on sep-anarchy-ffi for the
+//! `../README.md` and per-crate doc on sep-anarchy-ffi for the
 //! ABI conventions and helper-inlining rationale.
 
 use std::ffi::{c_char, CString};

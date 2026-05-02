@@ -1,5 +1,5 @@
 // Mobile-FFI for the SEP-Tyranny contract type. See
-// plonk/FFI-DESIGN.md for the ABI contract.
+// ../README.md for the ABI contract.
 //
 // Witness inputs follow the leaf-hash + admin-secret-key shape: mobile
 // callers supply public-ish leaf hashes for the full member tree plus

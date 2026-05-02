@@ -1,5 +1,5 @@
 // Mobile-FFI for the SEP-OneOnOne contract type. See
-// plonk/FFI-DESIGN.md for the ABI contract.
+// ../README.md for the ABI contract.
 
 #ifndef ONYM_ONEONONE_FFI_H
 #define ONYM_ONEONONE_FFI_H

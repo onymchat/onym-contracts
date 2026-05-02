@@ -4,7 +4,7 @@
 //! shared `synthesize_membership` + `synthesize_update` circuits) for
 //! consumption from `onym-sdk-swift` / `onym-sdk-kotlin`.
 //!
-//! See `plonk/FFI-DESIGN.md` for ABI contract; this crate is a per-type
+//! See `../README.md` for ABI contract; this crate is a per-type
 //! FFI under that design and intentionally inlines the small helper
 //! layer (run_ffi, write_buffer, OnymByteBuffer struct) so its cdylib
 //! exports only `onym_anarchy_*` symbols. Clients link

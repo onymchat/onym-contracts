@@ -5,7 +5,7 @@
 //! binding (`admin_pubkey_commitment = Poseidon(Poseidon(admin_sk),
 //! group_id_fr)`) on top of the shared anarchy membership/update
 //! circuits. See `circuit::plonk::tyranny` for the full constraint
-//! list and `plonk/FFI-DESIGN.md` for ABI.
+//! list and `../README.md` for ABI.
 //!
 //! ## Witness inputs (leaf-hash + admin-secret-key shape)
 //!
