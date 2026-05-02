@@ -24,6 +24,9 @@ CONTRACT_ORDER = {
     "sep-oligarchy": 2,
     "sep-oneonone": 3,
     "sep-tyranny": 4,
+    # PQ flavor — sorted after PLONK so a mixed-flavor JSONL (if it
+    # ever happens) puts PLONK rows on top.
+    "pq-sep-anarchy": 10,
 }
 
 OP_ORDER = {
@@ -168,6 +171,73 @@ def build_gas_table(op_rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+PLONK_CONTRACTS = {
+    "sep-anarchy",
+    "sep-democracy",
+    "sep-oligarchy",
+    "sep-oneonone",
+    "sep-tyranny",
+}
+PQ_CONTRACTS = {"pq-sep-anarchy"}
+
+
+def detect_flavor(contract_rows: list[dict], op_rows: list[dict]) -> str:
+    """Returns 'plonk', 'pq', or 'mixed' based on which contract names
+    appear in the JSONL. Used to choose the explanatory notes block —
+    PLONK and PQ have very different reasons their revert-mode rows
+    show up the way they do, and the bottom-section notes need to
+    reflect the right one."""
+    seen = {row.get("contract", "") for row in contract_rows}
+    seen.update(row.get("contract", "") for row in op_rows)
+    has_plonk = bool(seen & PLONK_CONTRACTS)
+    has_pq = bool(seen & PQ_CONTRACTS)
+    if has_plonk and has_pq:
+        return "mixed"
+    if has_pq:
+        return "pq"
+    return "plonk"
+
+
+def notes_for_flavor(flavor: str) -> list[str]:
+    common = ["- Stroops are testnet stroops; 1 XLM = 10,000,000 stroops."]
+    if flavor == "pq":
+        return common + [
+            "- The PQ flavor has no off-chain prover yet, so every `create_group` / "
+            "`verify_membership` / `update_commitment` row in this run is captured "
+            "in **revert mode** — the FRI verifier rejects at its parser's first "
+            "length gate. The `Stroops` column is therefore the *floor* cost for "
+            "the entrypoint (deserialise + replay-check + parser entry), not the "
+            "success-path cost. Real-proof rows will replace these once the PQ "
+            "prover lands and feeds `gen-pq-membership-proof` / "
+            "`gen-pq-update-proof` analogues into the bench driver.",
+            "- `bump_group_ttl` and `verify_membership` revert via `GroupNotFound`: "
+            "no group is ever successfully created in this skeleton run, so every "
+            "lookup returns the not-found error.",
+            "- See the `pq/verifier` crate docs for the open-work list: batched "
+            "PCS layer, prover-side fixtures, canonical Poseidon2 round constants.",
+        ]
+    if flavor == "plonk":
+        return common + [
+            "- `verify_membership` rows for `sep-oligarchy` are captured in revert-mode "
+            "(well-formed proof, non-matching PI); the verifier returns `Ok(false)` "
+            "on `InvalidProof` without reverting, so the captured fee equals the "
+            "success-path cost. Rows for `sep-anarchy` and `sep-democracy` use real "
+            "verifying proofs (V2).",
+            "- `update_commitment` for `sep-anarchy` uses real proofs via "
+            "`gen-update-proof` and captures the full success-path cost including "
+            "post-verify storage writes.",
+            "- `sep-tyranny` and the `update_commitment` rows for `sep-democracy` / "
+            "`sep-oligarchy` / `sep-oneonone.verify_membership` are deferred to V3 — "
+            "they need contract-specific proof generators that don't exist yet.",
+        ]
+    # mixed
+    return common + [
+        "- This run includes both PLONK and PQ contracts; rows for each flavor "
+        "follow that flavor's bench-mode conventions. See the per-flavor "
+        "bench-gas drivers for which entrypoints are revert-mode vs. real-proof."
+    ]
+
+
 def main() -> int:
     args = parse_args()
     op_rows, contract_rows = load_rows(args.jsonl)
@@ -176,8 +246,11 @@ def main() -> int:
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
+    flavor = detect_flavor(contract_rows, op_rows)
+    title_suffix = {"pq": " (PQ)", "plonk": "", "mixed": " (mixed)"}[flavor]
+
     body_lines = [
-        f"# SEP MLS testnet gas benchmarks — {args.tag}",
+        f"# SEP MLS testnet gas benchmarks{title_suffix} — {args.tag}",
         "",
         f"- **Network:** {args.network}",
         f"- **Captured:** {captured_at}",
@@ -193,18 +266,7 @@ def main() -> int:
         "",
         "## Notes",
         "",
-        "- Stroops are testnet stroops; 1 XLM = 10,000,000 stroops.",
-        "- `verify_membership` rows for `sep-oligarchy` are captured in revert-mode "
-        "(well-formed proof, non-matching PI); the verifier returns `Ok(false)` "
-        "on `InvalidProof` without reverting, so the captured fee equals the "
-        "success-path cost. Rows for `sep-anarchy` and `sep-democracy` use real "
-        "verifying proofs (V2).",
-        "- `update_commitment` for `sep-anarchy` uses real proofs via "
-        "`gen-update-proof` and captures the full success-path cost including "
-        "post-verify storage writes.",
-        "- `sep-tyranny` and the `update_commitment` rows for `sep-democracy` / "
-        "`sep-oligarchy` / `sep-oneonone.verify_membership` are deferred to V3 — "
-        "they need contract-specific proof generators that don't exist yet.",
+        *notes_for_flavor(flavor),
     ]
 
     args.output.write_text("\n".join(body_lines) + "\n")
