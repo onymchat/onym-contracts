@@ -1,0 +1,37 @@
+[package]
+name = "pq-sep-anarchy-contract"
+version = "0.1.0"
+edition = "2021"
+description = "Soroban smart contract for SEP Anarchy (PQ flavor): per-type single-signer membership group, FRI-verified via the shared fri-verifier crate (BabyBear field, Poseidon2-W16 sponge transcript). Same entrypoint shape as plonk/sep-anarchy so clients are flavor-agnostic."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+# Same SDK floor as plonk/sep-anarchy (=26.0.0-rc.1, requires rustc
+# 1.91.0). The PQ verifier reaches into `env.crypto()` for the
+# Poseidon2 host primitive — that surface is the same release.
+soroban-sdk = { version = "=26.0.0-rc.1", features = ["alloc"] }
+
+# Shared no_std FRI verifier — single entry point this contract calls.
+fri-verifier = { path = "../verifier" }
+
+[dev-dependencies]
+soroban-sdk = { version = "=26.0.0-rc.1", features = ["alloc", "testutils"] }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

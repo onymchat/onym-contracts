@@ -1,0 +1,3 @@
+[toolchain]
+# Soroban SDK 26 requires rustc ≥ 1.91.0. Same pin as plonk/verifier.
+channel = "1.91.0"

@@ -1,0 +1,34 @@
+[package]
+name = "fri-verifier"
+version = "0.1.0"
+edition = "2021"
+description = "Soroban-portable post-quantum FRI verifier shared by pq/sep-* contracts. BabyBear field, Poseidon2-W16 sponge transcript, FRI low-degree test, binary Merkle authentication paths. Mirrors the layout of `plonk-verifier` but swaps the BLS12-381+KZG cryptographic core for hash-based PQ machinery. The Plonky3 prover-side reference is the spec; this crate is the on-chain implementation, byte-equivalent."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+# Soroban SDK 26.0.0-rc.1 — same floor as plonk-verifier. The PQ
+# verifier uses `env.crypto().poseidon2_babybear_w16(...)` (host
+# primitive; assumed available — the wrapper in `host.rs` is the
+# single point of contact and falls through to a software reference
+# when the host fn is not bound, so the crate is testable today).
+#
+# rustc floor: 1.91.0 (per soroban-sdk 26's Cargo.toml).
+[dependencies]
+soroban-sdk = "=26.0.0-rc.1"
+
+[dev-dependencies]
+soroban-sdk = { version = "=26.0.0-rc.1", features = ["testutils"] }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
