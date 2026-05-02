@@ -1,0 +1,126 @@
+name: FFI Build
+
+# Per-crate build + round-trip tests for the mobile FFI surface
+# (plonk/sep-{common,anarchy,oneonone,tyranny}-ffi).
+#
+# sep-democracy-ffi and sep-oligarchy-ffi are not in scope for this
+# workflow — their K-of-N quorum witnesses can't be safely surfaced
+# via mobile FFI without a quorum-model redesign (see issue #26).
+#
+# Each crate has its own Cargo.toml + Cargo.lock + rust-toolchain.toml
+# and pins to 1.88.0 (matches plonk/prover) so all four share the same
+# arkworks-0.5 / jellyfish build graph as their `onym-plonk-prover`
+# path dep.
+#
+# `cargo test --release` matters: the prove_* tests run preprocess +
+# prove + verify per call (~1–2s release, ~30s debug). Running in
+# debug times out the runner.
+#
+# Third-party `uses:` are pinned to commit SHA (with the version tag in
+# a trailing comment for human + Dependabot readability), matching
+# pr.yml.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'plonk/sep-*-ffi/**'
+      - 'plonk/prover/**'
+      - 'plonk/FFI-DESIGN.md'
+      - '.github/workflows/ffi.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'plonk/sep-*-ffi/**'
+      - 'plonk/prover/**'
+      - 'plonk/FFI-DESIGN.md'
+      - '.github/workflows/ffi.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ffi-crate:
+    name: ffi / ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - sep-common-ffi
+          - sep-anarchy-ffi
+          - sep-oneonone-ffi
+          - sep-tyranny-ffi
+    # Intentionally NOT setting RUSTUP_TOOLCHAIN — each crate's
+    # rust-toolchain.toml pins 1.88.0 and rustup auto-installs that
+    # channel on first cargo invocation. Same pattern as plonk-prover.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        # `stable` here just gets rustup onto the runner; rustup then
+        # honors plonk/${{ matrix.crate }}/rust-toolchain.toml and
+        # pulls 1.88.0 on first cargo command.
+
+      - name: Cache Rust build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            plonk/${{ matrix.crate }}/target
+          key: pr-${{ matrix.crate }}-${{ hashFiles(format('plonk/{0}/Cargo.toml', matrix.crate), format('plonk/{0}/Cargo.lock', matrix.crate), 'plonk/prover/Cargo.toml', 'plonk/prover/Cargo.lock') }}
+
+      - name: cargo build --release (staticlib + cdylib + rlib)
+        working-directory: plonk/${{ matrix.crate }}
+        run: cargo build --release
+
+      - name: cargo test --release
+        working-directory: plonk/${{ matrix.crate }}
+        # Round-trip tests prove + self-verify; debug-mode prove takes
+        # ~30s/test which would time out the matrix.
+        run: cargo test --release
+
+      - name: Verify exported FFI symbols
+        working-directory: plonk/${{ matrix.crate }}
+        # Each crate must export only its own onym_* symbols (no leakage
+        # from prover/jellyfish/k256 deps). sep-common-ffi exports
+        # generic onym_* (compute/nostr/byte_buffer/string); per-type
+        # crates export onym_<type>_*. A regression in lib.rs that
+        # accidentally re-exported a dep's #[no_mangle] symbol would
+        # surface here as a foreign symbol in the staticlib.
+        run: |
+          set -euo pipefail
+          ARTIFACT="target/release/deps/libonym_${{ matrix.crate }}.a"
+          ARTIFACT="${ARTIFACT//-/_}"
+          if [ ! -f "$ARTIFACT" ]; then
+            echo "expected staticlib at $ARTIFACT not found"
+            ls -la target/release/deps/ | head -20
+            exit 1
+          fi
+          # Use nm with linux-style options (no -gU on linux); GNU nm
+          # prints external defined symbols by default.
+          SYMS=$(nm --defined-only --extern-only "$ARTIFACT" | awk '{print $3}' | grep -E '^onym_' || true)
+          if [ -z "$SYMS" ]; then
+            echo "no onym_ symbols exported by $ARTIFACT"
+            exit 1
+          fi
+          echo "Exported onym_ symbols ($(echo "$SYMS" | wc -l)):"
+          echo "$SYMS" | sort
+          # Any non-onym defined extern symbol from our crate would be
+          # a leak. The Rust runtime adds some platform symbols
+          # (rust_eh_personality, rust_panic etc.); we whitelist by
+          # checking nothing OTHER than onym_/rust_/__/_ZN/_RNv/
+          # platform-internal patterns leaks.
+          STRAY=$(nm --defined-only --extern-only "$ARTIFACT" | awk '{print $3}' \
+                  | grep -vE '^(onym_|rust_|__|_ZN|_RNv|_RINv|_RNC|_RNCs|_RNCsv|_RINvCs|DW\.|\.L|\.|$)' \
+                  | grep -vE '^(memcpy|memmove|memset|memcmp|bcmp|strlen)$' || true)
+          if [ -n "$STRAY" ]; then
+            echo "WARNING: non-onym/non-rust symbols exported (potential FFI leak):"
+            echo "$STRAY"
+            # Don't hard-fail — Rust's mangling scheme + linker may emit
+            # transient symbols we don't anticipate. Surface in CI logs
+            # so a human can audit before shipping.
+          fi
