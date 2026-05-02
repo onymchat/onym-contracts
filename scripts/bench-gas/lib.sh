@@ -208,7 +208,14 @@ emit_row() {
     local op="$2"
     local tier="$3"
     local hash="$4"
-    local extra="${5:-{\}}"
+    # The literal `{}` default has to be assigned out-of-band: bash
+    # parameter expansion `${5:-{\}}` preserves the backslash on
+    # bash 3.2 (macOS), expanding to `{\}` (3 chars) which `jq
+    # --argjson` rejects as invalid JSON. Escaping inside the
+    # expansion isn't portable — keep it simple and assign the
+    # default after the fact.
+    local extra="${5:-}"
+    [ -n "$extra" ] || extra='{}'
 
     if [ -z "$hash" ]; then
         # Fee capture failed (the tx wasn't submitted — most often the
@@ -227,7 +234,19 @@ emit_row() {
     fi
 
     local raw
-    raw="$(fetch_fee_full "$hash" || echo '{}')"
+    raw="$(fetch_fee_full "$hash" 2>/dev/null || echo '{}')"
+    # Race: `stellar tx fetch fee` can return non-JSON when the RPC's
+    # indexer hasn't caught up to a just-submitted tx (more likely on
+    # fast hardware than on a CI runner). Validate; on miss, brief
+    # sleep + retry; on second miss, fall through to `{}` so the row
+    # still emits with null fee fields rather than killing the bench.
+    if ! printf '%s' "$raw" | jq -e . >/dev/null 2>&1; then
+        sleep 3
+        raw="$(fetch_fee_full "$hash" 2>/dev/null || echo '{}')"
+        if ! printf '%s' "$raw" | jq -e . >/dev/null 2>&1; then
+            raw='{}'
+        fi
+    fi
     # `stellar tx fetch fee --output json` returns
     #   { "proposed": {fee, resource_fee, inclusion_fee},
     #     "charged":  {fee, resource_fee, inclusion_fee,
