@@ -1,0 +1,4 @@
+module OnymCommonFFI {
+    header "onym_common_ffi.h"
+    export *
+}

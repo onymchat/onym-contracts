@@ -1,0 +1,171 @@
+name: FFI Build
+
+# Per-crate build + round-trip tests for the mobile FFI surface
+# (plonk/sep-{common,anarchy,oneonone,tyranny}-ffi).
+#
+# sep-democracy-ffi and sep-oligarchy-ffi are not in scope for this
+# workflow — their K-of-N quorum witnesses can't be safely surfaced
+# via mobile FFI without a quorum-model redesign (see issue #26).
+#
+# Each crate has its own Cargo.toml + Cargo.lock + rust-toolchain.toml
+# and pins to 1.88.0 (matches plonk/prover) so all four share the same
+# arkworks-0.5 / jellyfish build graph as their `onym-plonk-prover`
+# path dep.
+#
+# `cargo test --release` matters: the prove_* tests run preprocess +
+# prove + verify per call (~1–2s release, ~30s debug). Running in
+# debug times out the runner.
+#
+# Third-party `uses:` are pinned to commit SHA (with the version tag in
+# a trailing comment for human + Dependabot readability), matching
+# pr.yml.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'plonk/sep-*-ffi/**'
+      - 'plonk/prover/**'
+      - 'plonk/sep-*-ffi/README.md'
+      - '.github/workflows/ffi.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'plonk/sep-*-ffi/**'
+      - 'plonk/prover/**'
+      - 'plonk/sep-*-ffi/README.md'
+      - '.github/workflows/ffi.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ffi-crate:
+    name: ffi / ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - sep-common-ffi
+          - sep-anarchy-ffi
+          - sep-oneonone-ffi
+          - sep-tyranny-ffi
+    # Intentionally NOT setting RUSTUP_TOOLCHAIN — each crate's
+    # rust-toolchain.toml pins 1.88.0 and rustup auto-installs that
+    # channel on first cargo invocation. Same pattern as plonk-prover.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        # `stable` here just gets rustup onto the runner; rustup then
+        # honors plonk/${{ matrix.crate }}/rust-toolchain.toml and
+        # pulls 1.88.0 on first cargo command.
+
+      - name: Cache Rust build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            plonk/${{ matrix.crate }}/target
+          key: pr-${{ matrix.crate }}-${{ hashFiles(format('plonk/{0}/Cargo.toml', matrix.crate), format('plonk/{0}/Cargo.lock', matrix.crate), 'plonk/prover/Cargo.toml', 'plonk/prover/Cargo.lock') }}
+
+      - name: cargo build --release (staticlib + cdylib + rlib)
+        working-directory: plonk/${{ matrix.crate }}
+        run: cargo build --release
+
+      - name: cargo test --release
+        working-directory: plonk/${{ matrix.crate }}
+        # Round-trip tests prove + self-verify; debug-mode prove takes
+        # ~30s/test which would time out the matrix.
+        run: cargo test --release
+
+      - name: Verify exported FFI symbols
+        working-directory: plonk/${{ matrix.crate }}
+        # Each crate must export only the onym_* prefix it OWNS (no
+        # leakage from prover / jellyfish / k256 deps, and no
+        # accidental cross-crate prefix sharing). sep-common-ffi owns
+        # the generic onym_{byte_buffer,string,compute,parse_plonk,
+        # nostr}_* surface; per-type crates own onym_<type>_*.
+        # A regression in lib.rs that accidentally re-exported a dep's
+        # #[no_mangle] symbol — or that defined an onym_ symbol
+        # outside its crate's prefix — surfaces here as a hard CI
+        # failure.
+        run: |
+          set -euo pipefail
+          ARTIFACT="target/release/deps/libonym_${{ matrix.crate }}.a"
+          ARTIFACT="${ARTIFACT//-/_}"
+          if [ ! -f "$ARTIFACT" ]; then
+            echo "expected staticlib at $ARTIFACT not found"
+            ls -la target/release/deps/ | head -20
+            exit 1
+          fi
+
+          # Per-crate allowlist for the onym_ prefix space the crate is
+          # entitled to define. ANY onym_ symbol outside this regex is
+          # treated as a leak (cross-crate prefix collision or
+          # accidental cdylib re-export).
+          case "${{ matrix.crate }}" in
+            sep-common-ffi)
+              # Common surface: byte buffer / string memory mgmt,
+              # hashing primitives, plonk proof parser, nostr.
+              ALLOWED_ONYM='^onym_(byte_buffer_free$|string_free$|compute_(leaf_hash|public_key|merkle_root|sha256_commitment|poseidon_commitment)$|parse_plonk_proof$|nostr_(derive_public_key|sign_event_id|verify_event_signature)$)'
+              ;;
+            sep-anarchy-ffi)  ALLOWED_ONYM='^onym_anarchy_'  ;;
+            sep-oneonone-ffi) ALLOWED_ONYM='^onym_oneonone_' ;;
+            sep-tyranny-ffi)  ALLOWED_ONYM='^onym_tyranny_'  ;;
+            *) echo "unknown matrix crate ${{ matrix.crate }}"; exit 1 ;;
+          esac
+
+          # GNU nm's `--defined-only --extern-only` is the Linux
+          # equivalent of macOS `nm -gU`.
+          ALL_DEFINED=$(nm --defined-only --extern-only "$ARTIFACT" | awk '{print $3}')
+          ONYM_SYMS=$(echo "$ALL_DEFINED" | grep -E '^onym_' || true)
+          if [ -z "$ONYM_SYMS" ]; then
+            echo "FAIL: no onym_ symbols exported by $ARTIFACT"
+            exit 1
+          fi
+          echo "Exported onym_ symbols ($(echo "$ONYM_SYMS" | wc -l)):"
+          echo "$ONYM_SYMS" | sort
+
+          # FAIL: onym_ symbols outside this crate's allowed prefix.
+          BAD_ONYM=$(echo "$ONYM_SYMS" | grep -vE "$ALLOWED_ONYM" || true)
+          if [ -n "$BAD_ONYM" ]; then
+            echo "FAIL: ${{ matrix.crate }} exports onym_ symbols outside its allowed prefix:"
+            echo "$BAD_ONYM"
+            echo "Allowed regex: $ALLOWED_ONYM"
+            exit 1
+          fi
+
+          # FAIL: non-onym, non-rust-runtime symbols (FFI leak from a
+          # transitive dep that exported #[no_mangle] symbols). The
+          # allowlist covers:
+          #   * Rust's mangled names (_ZN / _RNv / _RIN*)
+          #   * eh-personality (rust_*)
+          #   * platform compiler-builtins (__*)
+          #   * debug sections (DW.*, .L*, .*)
+          #   * standard libc memory builtins (memcpy, …)
+          #   * libm-shaped symbols: any single-word lowercase
+          #     identifier with an optional `f`/`l`/`f16`/`f32`/`f64`/
+          #     `f80`/`f128` suffix. Catches the entire C99 + C23
+          #     math.h surface that Rust's libstd re-exports on
+          #     linux-gnu — sqrt, fabs, fdim, copysign, fmaf128,
+          #     roundeven, fmaximum, etc. — without us having to keep
+          #     enumerating new IEEE 754-2018 functions every time
+          #     the toolchain bumps. A real dep leak would have
+          #     snake_case identifiers (e.g. `connect_handler`,
+          #     `init_xyz`) and gets caught by the no-underscore
+          #     restriction in the libm pattern.
+          STRAY=$(echo "$ALL_DEFINED" \
+                  | grep -vE '^(onym_|rust_|__|_ZN|_RNv|_RINv|_RNC|_RNCs|_RNCsv|_RINvCs|DW\.|\.L|\.|$)' \
+                  | grep -vE '^(memcpy|memmove|memset|memcmp|bcmp|strlen)$' \
+                  | grep -vE '^[a-z][a-z0-9]*[fl]?(16|32|64|80|128)?$' || true)
+          if [ -n "$STRAY" ]; then
+            echo "FAIL: ${{ matrix.crate }} exports non-onym, non-rust-runtime symbols (likely FFI leak from a dep):"
+            echo "$STRAY"
+            exit 1
+          fi
+          echo "OK: ${{ matrix.crate }} symbol surface is clean."

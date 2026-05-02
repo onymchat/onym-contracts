@@ -1,0 +1,41 @@
+[package]
+name = "onym-sep-anarchy-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "Mobile-FFI for the SEP-Anarchy contract type — bake_membership_vk, bake_update_vk, prove_membership, prove_update plus pinned-VK SHA accessors. Consumed by onym-sdk-swift / onym-sdk-kotlin."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+# Off-chain prover crate — source of truth for the circuit + baker +
+# pinned-VK constants we wrap. No dep on sep-common-ffi: per-type
+# crates inline the small helper layer (run_ffi, write_buffer, byte
+# buffer struct) so each cdylib stays self-contained and ships only
+# its own onym_anarchy_* symbols. sep-common-ffi is linked separately
+# by clients for the shared free / hashing / commitment surface.
+onym-plonk-prover = { path = "../prover" }
+
+# jf-plonk + jf-relation are pulled in transitively through
+# onym-plonk-prover but we name them here too because we directly
+# reference `PlonkCircuit`, `Circuit`, `prove`, `preprocess`, `verify`
+# at the FFI boundary. Keeping these explicit avoids surprise version
+# drift if onym-plonk-prover ever feature-gates them.
+jf-plonk    = { git = "https://github.com/EspressoSystems/jellyfish", tag = "jf-plonk-v0.8.0",    default-features = false, features = ["std"] }
+jf-relation = { git = "https://github.com/EspressoSystems/jellyfish", tag = "jf-relation-v0.5.0", default-features = false, features = ["std"] }
+
+ark-bls12-381-v05 = { package = "ark-bls12-381", version = "0.5", default-features = false, features = ["curve"] }
+ark-ff-v05        = { package = "ark-ff",        version = "0.5", default-features = false, features = ["std"] }
+ark-serialize-v05 = { package = "ark-serialize", version = "0.5", default-features = false, features = ["std"] }
+
+rand_chacha = "0.3"
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

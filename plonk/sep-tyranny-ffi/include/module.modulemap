@@ -1,0 +1,4 @@
+module OnymTyrannyFFI {
+    header "onym_tyranny_ffi.h"
+    export *
+}

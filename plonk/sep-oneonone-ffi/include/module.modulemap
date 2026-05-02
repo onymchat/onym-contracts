@@ -1,0 +1,4 @@
+module OnymOneOnOneFFI {
+    header "onym_oneonone_ffi.h"
+    export *
+}
