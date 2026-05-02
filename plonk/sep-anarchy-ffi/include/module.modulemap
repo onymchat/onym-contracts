@@ -1,0 +1,4 @@
+module OnymAnarchyFFI {
+    header "onym_anarchy_ffi.h"
+    export *
+}
