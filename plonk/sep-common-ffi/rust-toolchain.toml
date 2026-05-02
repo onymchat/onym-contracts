@@ -1,0 +1,8 @@
+[toolchain]
+# Match plonk/prover/rust-toolchain.toml — onym-plonk-prover is a path
+# dependency and the two crates share the arkworks-0.5 / jellyfish
+# build graph. Bumping here without bumping prover/ (or vice-versa)
+# splits the dep tree and recompiles arkworks twice.
+channel = "1.88.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

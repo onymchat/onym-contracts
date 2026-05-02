@@ -1,0 +1,36 @@
+[package]
+name = "onym-sep-common-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "Shared mobile-FFI primitives for the onym-contracts sep-* family — Poseidon hashing, BLS12-381 pubkey derivation, native Merkle root, sha256/poseidon commitment, plonk proof parser, secp256k1 schnorr (Nostr). C ABI consumed by onym-sdk-swift / onym-sdk-kotlin."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+# The off-chain prover crate is the source of truth for Poseidon
+# parameters and the plonk proof byte format. We pull just its public
+# `circuit::plonk::poseidon` + `circuit::plonk::proof_format` modules.
+onym-plonk-prover = { path = "../prover" }
+
+# Arkworks 0.5 — same renamed-package convention prover/ uses to avoid
+# conflicts with arkworks 0.4 in the broader workspace ecosystem.
+ark-bls12-381-v05 = { package = "ark-bls12-381", version = "0.5", default-features = false, features = ["curve"] }
+ark-ec-v05        = { package = "ark-ec",        version = "0.5", default-features = false, features = ["std"] }
+ark-ff-v05        = { package = "ark-ff",        version = "0.5", default-features = false, features = ["std"] }
+ark-serialize-v05 = { package = "ark-serialize", version = "0.5", default-features = false, features = ["std"] }
+
+# SHA-256 for the legacy v1 commitment shape and selftest scaffolding.
+sha2 = "0.10"
+
+# Nostr secp256k1 Schnorr — same crate the v1 stellar-mls FFI used.
+# `schnorr` feature gates the BIP340 surface (`SigningKey`,
+# `VerifyingKey`, `Signature`) we expose under onym_nostr_*.
+k256 = { version = "0.13", default-features = false, features = ["std", "schnorr"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
