@@ -13,6 +13,15 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Local machine / agent workspace artifacts
+.DS_Store
+.claude/
+.worktrees/
+
+# Standalone library-crate lockfile. Contract crates keep Cargo.lock
+# tracked for reproducible WASM builds; verifier is locked through them.
+plonk/verifier/Cargo.lock
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
