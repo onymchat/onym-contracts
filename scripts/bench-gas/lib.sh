@@ -324,3 +324,45 @@ bench_invoke() {
 
     emit_row "$BENCH_CURRENT_CONTRACT" "$op" "$tier" "$hash"
 }
+
+# bench_invoke_required <contract_id> <op> <tier> <fn> <fn_args...>
+# Same as bench_invoke, but fails the script if the CLI invocation
+# fails or does not submit a transaction. Use this for release cleanup
+# that determines the published contract's final state.
+bench_invoke_required() {
+    local cid="$1"
+    local op="$2"
+    local tier="$3"
+    local fn="$4"
+    shift 4
+
+    local err
+    err="$(mktemp)"
+
+    local status=0
+    stellar contract invoke \
+        --config-dir "$BENCH_CONFIG_DIR" \
+        --network "$BENCH_NETWORK" \
+        --id "$cid" \
+        --source-account "$BENCH_DEPLOYER" \
+        --send yes \
+        -- "$fn" "$@" \
+        > /dev/null 2> "$err" || status=$?
+
+    cat "$err" >&2
+
+    local hash
+    hash="$(capture_tx_hash "$err" || true)"
+    rm -f "$err"
+
+    if [ "$status" -ne 0 ]; then
+        return "$status"
+    fi
+
+    emit_row "$BENCH_CURRENT_CONTRACT" "$op" "$tier" "$hash"
+
+    if [ -z "$hash" ]; then
+        echo "error: required invoke submitted no transaction: $fn" >&2
+        return 1
+    fi
+}

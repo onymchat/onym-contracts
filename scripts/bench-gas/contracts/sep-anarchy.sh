@@ -104,7 +104,7 @@ bench_invoke "$CID" "set_restricted_mode" "n/a" "set_restricted_mode" \
 # mode gas cost; this one captures the unrestrict cost as a bonus
 # data point and ends in a usable state.
 echo "==> [$BENCH_CURRENT_CONTRACT] set_restricted_mode(false)"
-bench_invoke "$CID" "set_restricted_mode" "n/a" "set_restricted_mode_off" \
+bench_invoke_required "$CID" "set_restricted_mode(false)" "n/a" "set_restricted_mode" \
     --restricted false
 
 echo "==> [$BENCH_CURRENT_CONTRACT] done"

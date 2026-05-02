@@ -59,7 +59,7 @@ bench_invoke "$CID" "bump_group_ttl" "n/a" "bump_group_ttl" \
 # Leave the contract unrestricted so the relayer's allowlisted callers
 # can actually call create_group post-release. See sep-anarchy.sh.
 echo "==> [$BENCH_CURRENT_CONTRACT] set_restricted_mode(false)"
-bench_invoke "$CID" "set_restricted_mode" "n/a" "set_restricted_mode_off" \
+bench_invoke_required "$CID" "set_restricted_mode(false)" "n/a" "set_restricted_mode" \
     --restricted false
 
 # Read-only entrypoints (`get_commitment`) are skipped — the CLI
