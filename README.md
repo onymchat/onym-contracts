@@ -119,6 +119,7 @@ without branching on the underlying SNARK.
          • 5 home_domain-stamped WASM assets
          • per-contract testnet gas table
          • stellar.expert addresses for each deployment
+         • contracts-manifest.json for all historical deployments
 ```
 
 ```
@@ -185,6 +186,14 @@ what `release.yml` invokes on tag push, with source-code attestation under
 measures per-op fees via `stellar contract invoke`. Triggered automatically
 on tag push from `release.yml` after the build matrix completes; the
 rendered table replaces the GitHub release body.
+
+`release.yml` also publishes `contracts-manifest.json` on the latest GitHub
+Release. The asset is regenerated from all historical release bodies plus the
+current run's deployed-contract JSONL:
+
+```
+https://github.com/onymchat/onym-contracts/releases/latest/download/contracts-manifest.json
+```
 
 ## Per-contract
 
