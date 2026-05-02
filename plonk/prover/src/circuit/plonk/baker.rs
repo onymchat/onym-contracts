@@ -159,9 +159,9 @@ pub const ONEONONE_CREATE_VK_SHA256_HEX: &str =
 /// **simplified single-signer** fallback (`synthesize_democracy_update`)
 /// because the quorum circuit blows the n=32768 SRS ceiling at depth 11.
 pub const DEMOCRACY_UPDATE_VK_SHA256_HEX_SMALL: &str =
-    "3552128957a91c2d8cceadc6ef3a9c693784dabe13c415148c51116b23bd3cb9";
+    "c3c4277c97f98fede4d5507027cd308f21154cf66d4a115b803d8babc4d7d0da";
 pub const DEMOCRACY_UPDATE_VK_SHA256_HEX_MEDIUM: &str =
-    "5159a426bbc1dd2d66d4bf986909c414dfe039feb74829d438f6dc5218231fb6";
+    "53572f1bf570ec90e90613c317cff740a38a58f11a17aa89d31fe50a2bc53034";
 pub const DEMOCRACY_UPDATE_VK_SHA256_HEX_LARGE: &str =
     "73d120375c3edd0d793bb089bd42a2a9955d0ddb460b0d07cc67246ab579760e";
 
@@ -382,7 +382,7 @@ pub fn bake_democracy_update_vk(depth: usize) -> Result<Vec<u8>, BakeError> {
 pub const OLIGARCHY_CREATE_VK_SHA256_HEX: &str =
     "07ca92baabded97d241d11e378203bb2d45c955a1641c02a581e2f2df42a1a25";
 pub const OLIGARCHY_UPDATE_VK_SHA256_HEX: &str =
-    "f89a3e30c48b6d81e9276dacd7f5b41b497ca954369426d5fa995f5343592cf4";
+    "a3ceb974b37e7d8a7511f9f07120767abddbb8a42a1523aa92afb97ef075efb5";
 
 /// Pinned anchors for the **oligarchy-specific** membership VK shape
 /// per tier (issue #208). The standard `bake_membership_vk` produces

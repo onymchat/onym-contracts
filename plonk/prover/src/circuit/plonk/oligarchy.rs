@@ -25,9 +25,13 @@
 //!   1. **K-of-N admin quorum** — `OLIGARCHY_K_MAX = 2` admin signer
 //!      slots; each `(sk, merkle_path, leaf_idx, active)` against
 //!      `admin_root_old` at depth 5. Active slots form a strict
-//!      prefix; pairwise-distinct `leaf_idx` for active slots
-//!      (anti-double-count); `K = Σ active` and `K ≥ threshold`
-//!      with both range-checked into 2 bits.
+//!      prefix; pairwise-distinct `leaf_idx` *and* pairwise-distinct
+//!      leaf values `Poseidon(sk)` for active slots (anti-double-
+//!      count: prevents one signer filling both slots, including
+//!      the case where the same admin secret key happens to appear
+//!      at multiple distinct positions in the admin tree); `K = Σ
+//!      active` and `K ≥ threshold` with both range-checked into
+//!      2 bits.
 //!   2. **Member count delta** — `occupancy_commitment_X =
 //!      Poseidon(member_count_X, salt_oc_X)` with
 //!      `|count_new - count_old| ≤ 1`. Tree-level single-leaf
@@ -282,6 +286,7 @@ pub fn synthesize_oligarchy_update_quorum(
 
     // Active-conditional admin-tree membership + leaf-index decomp.
     let mut leaf_idx_field_vars: Vec<Variable> = Vec::with_capacity(OLIGARCHY_K_MAX);
+    let mut leaf_vars: Vec<Variable> = Vec::with_capacity(OLIGARCHY_K_MAX);
     for (i, signer) in witness.admin_signers.iter().enumerate() {
         let sk_var = circuit.create_variable(signer.secret_key)?;
         let path_vars: Vec<Variable> = signer
@@ -309,6 +314,7 @@ pub fn synthesize_oligarchy_update_quorum(
         leaf_idx_field_vars.push(leaf_idx_var);
 
         let leaf_var = poseidon_hash_one_gadget(circuit, sk_var)?;
+        leaf_vars.push(leaf_var);
         let computed_root =
             compute_merkle_root_gadget(circuit, leaf_var, &path_vars, &bit_vars)?;
 
@@ -319,19 +325,32 @@ pub fn synthesize_oligarchy_update_quorum(
         circuit.enforce_constant(prod, Fr::from(0u64))?;
     }
 
-    // Anti-double-count: pairwise leaf_idx distinctness across active
-    // slots. Distinctness is on `leaf_idx`, not `Poseidon(sk)` — relies
-    // on admin-tree uniqueness (the off-circuit tree builder
-    // deduplicates secret keys before populating leaves).
+    // Anti-double-count: pairwise distinctness across active slots on
+    // both `leaf_idx` *and* the leaf value `Poseidon(sk)`. The
+    // leaf-value gate is the load-bearing one: without it, an
+    // attacker exploiting an admin tree that accidentally seats the
+    // same secret key at two distinct positions could produce two
+    // valid Merkle openings (different `leaf_idx`, different paths,
+    // same `Poseidon(sk)`) and pass K=2 with a single signer. By
+    // Poseidon collision resistance, distinct leaf values imply
+    // distinct secret keys. The `leaf_idx` gate is retained as cheap
+    // defense-in-depth — it catches same-position witness aliasing
+    // directly without going through the Merkle gate.
     for i in 1..OLIGARCHY_K_MAX {
         for j in 0..i {
-            let eq = circuit.is_equal(leaf_idx_field_vars[j], leaf_idx_field_vars[i])?;
             let prev_a: Variable = active_vars[j].into();
             let cur_a: Variable = active_vars[i].into();
             let both_active = circuit.mul(prev_a, cur_a)?;
-            let eq_var: Variable = eq.into();
-            let bad = circuit.mul(both_active, eq_var)?;
-            circuit.enforce_constant(bad, Fr::from(0u64))?;
+
+            let eq_idx = circuit.is_equal(leaf_idx_field_vars[j], leaf_idx_field_vars[i])?;
+            let eq_idx_var: Variable = eq_idx.into();
+            let bad_idx = circuit.mul(both_active, eq_idx_var)?;
+            circuit.enforce_constant(bad_idx, Fr::from(0u64))?;
+
+            let eq_leaf = circuit.is_equal(leaf_vars[j], leaf_vars[i])?;
+            let eq_leaf_var: Variable = eq_leaf.into();
+            let bad_leaf = circuit.mul(both_active, eq_leaf_var)?;
+            circuit.enforce_constant(bad_leaf, Fr::from(0u64))?;
         }
     }
 
@@ -941,6 +960,74 @@ mod tests {
         let sks: Vec<Fr> = (1u64..=4).map(Fr::from).collect();
         let mut w = build_quorum_witness(&sks, OLIGARCHY_K_MAX, OLIGARCHY_K_MAX as u64, 42, 5, 5);
         w.admin_signers[1] = w.admin_signers[0].clone();
+        let mut c = PlonkCircuit::<Fr>::new_turbo_plonk();
+        synthesize_oligarchy_update_quorum(&mut c, &w).unwrap();
+        assert!(c.check_circuit_satisfiability(&pi_quorum(&w)).is_err());
+    }
+
+    /// Same admin secret key seated at two distinct positions in the
+    /// admin tree: one signer can produce two valid Merkle openings
+    /// (different `leaf_idx`, different paths, same `Poseidon(sk)`)
+    /// and pass K=2 with a single signer. The leaf-index distinctness
+    /// gate alone would let this through; the leaf-value gate catches
+    /// it. Mirrors `democracy::rejects_duplicate_secret_key_at_distinct_leaf_indices`.
+    #[test]
+    fn quorum_rejects_duplicate_secret_key_at_distinct_leaf_indices() {
+        // Build an admin tree where the same admin sk lives at
+        // positions 0 and 4. Other slots are distinct so only the
+        // duplication is the attack surface.
+        let dup_sk = Fr::from(1u64);
+        let mut admin_sks: Vec<Fr> =
+            (0..(1usize << OLIGARCHY_ADMIN_DEPTH)).map(|i| Fr::from((i as u64) + 100)).collect();
+        admin_sks[0] = dup_sk;
+        admin_sks[4] = dup_sk;
+        let (admin_root, admin_paths) = build_admin_tree(&admin_sks, OLIGARCHY_ADMIN_DEPTH);
+        let member_root = Fr::from(0xCAFEu64);
+        let salt_old = Fr::from(0xEEEEu64);
+        let salt_new = Fr::from(0xFFFFu64);
+        let salt_oc_old = Fr::from(0x55u64);
+        let salt_oc_new = Fr::from(0x66u64);
+        let occ_old = poseidon_hash_two_v05(&Fr::from(5u64), &salt_oc_old);
+        let occ_new = poseidon_hash_two_v05(&Fr::from(5u64), &salt_oc_new);
+        let c_old = native_quorum_c(member_root, 42, salt_old, occ_old, admin_root);
+        let c_new = native_quorum_c(member_root, 43, salt_new, occ_new, admin_root);
+
+        // Both signer slots use `dup_sk` but reference admin-tree
+        // positions 0 and 4 with their genuine paths.
+        let admin_signers: [OligarchyAdminSigner; OLIGARCHY_K_MAX] = [
+            OligarchyAdminSigner {
+                secret_key: dup_sk,
+                merkle_path: admin_paths[0].clone(),
+                leaf_index: 0,
+                active: true,
+            },
+            OligarchyAdminSigner {
+                secret_key: dup_sk,
+                merkle_path: admin_paths[4].clone(),
+                leaf_index: 4,
+                active: true,
+            },
+        ];
+
+        let w = OligarchyUpdateQuorumWitness {
+            c_old,
+            epoch_old: 42,
+            c_new,
+            occupancy_commitment_old: occ_old,
+            occupancy_commitment_new: occ_new,
+            admin_threshold_numerator: OLIGARCHY_K_MAX as u64,
+            admin_signers,
+            member_root_old: member_root,
+            member_root_new: member_root,
+            admin_root_old: admin_root,
+            admin_root_new: admin_root,
+            member_count_old: 5,
+            member_count_new: 5,
+            salt_oc_old,
+            salt_oc_new,
+            salt_old,
+            salt_new,
+        };
         let mut c = PlonkCircuit::<Fr>::new_turbo_plonk();
         synthesize_oligarchy_update_quorum(&mut c, &w).unwrap();
         assert!(c.check_circuit_satisfiability(&pi_quorum(&w)).is_err());

@@ -25,8 +25,13 @@
 //!      - Active slots are a strict prefix (`active_i ⇒ active_{i-1}`).
 //!      - For each active slot: `Poseidon(sk_i)` opens to
 //!        `member_root_old` at `leaf_idx_i`.
-//!      - For any pair of active slots, `leaf_idx_i ≠ leaf_idx_j`
-//!        (anti-double-count: prevents one signer filling both slots).
+//!      - For any pair of active slots, both
+//!        `leaf_idx_i ≠ leaf_idx_j` *and*
+//!        `Poseidon(sk_i) ≠ Poseidon(sk_j)`
+//!        (anti-double-count: prevents one signer filling both
+//!        slots, including the case where the same secret key
+//!        happens to appear at multiple distinct leaf positions
+//!        in the member tree).
 //!      - K = Σ active_i.
 //!      - K ≥ threshold_numerator. Encoded as `K = threshold + slack`
 //!        with both `threshold` and `slack` range-checked into 2 bits
@@ -226,6 +231,7 @@ pub fn synthesize_democracy_update_quorum(
     //             called only for active slots, gated by an
     //             active-conditional enforce_equal.
     let mut leaf_idx_field_vars: Vec<Variable> = Vec::with_capacity(K_MAX);
+    let mut leaf_vars: Vec<Variable> = Vec::with_capacity(K_MAX);
     for (i, signer) in witness.signers.iter().enumerate() {
         let sk_var = circuit.create_variable(signer.secret_key)?;
         let path_vars: Vec<Variable> = signer
@@ -255,6 +261,7 @@ pub fn synthesize_democracy_update_quorum(
         leaf_idx_field_vars.push(leaf_idx_var);
 
         let leaf_var = poseidon_hash_one_gadget(circuit, sk_var)?;
+        leaf_vars.push(leaf_var);
         let computed_root =
             compute_merkle_root_gadget(circuit, leaf_var, &path_vars, &bit_vars)?;
 
@@ -266,27 +273,39 @@ pub fn synthesize_democracy_update_quorum(
         circuit.enforce_constant(prod, Fr::from(0u64))?;
     }
 
-    // Anti-double-count: forbid two active slots from sharing the
-    // same leaf_idx. For every pair (j, i) with i > j, enforce
+    // Anti-double-count: forbid two active slots from sharing either
+    // the same leaf_idx **or** the same leaf value `Poseidon(sk)`. For
+    // every pair (j, i) with i > j, enforce both
     //   active_j · active_i · is_equal(leaf_idx_j, leaf_idx_i) = 0
-    // i.e. if both slots are active, their leaf indices must differ.
+    //   active_j · active_i · is_equal(leaf_j,     leaf_i)     = 0
     //
-    // **Distinctness is on `leaf_idx`, not on `Poseidon(sk)`.** This
-    // assumes member-tree uniqueness (no two distinct leaf positions
-    // carry the same `Poseidon(sk)`) — a witness-construction
-    // invariant established off-circuit when the tree is built from
-    // a deduplicated secret-key set. If that invariant ever weakens,
-    // a single signer could occupy multiple `leaf_idx` slots and
-    // double-count under this check.
+    // **Why both.** The leaf_idx gate alone leaves a hole when the
+    // off-circuit tree builder accidentally seats the same secret key
+    // at two distinct positions: an attacker holding that one secret
+    // can produce two valid Merkle openings (different leaf_idx,
+    // different paths, both pointing at the same leaf value) and
+    // satisfy K=2 with a single signer. Adding the leaf-value gate
+    // closes the hole independently of the off-circuit
+    // dedup-on-construction invariant. By Poseidon collision
+    // resistance, distinct leaf values imply distinct secret keys.
+    // The leaf_idx gate is retained as cheap defense-in-depth: it
+    // catches the same-position witness-aliasing case directly,
+    // without going through the Merkle gate.
     for i in 1..K_MAX {
         for j in 0..i {
-            let eq = circuit.is_equal(leaf_idx_field_vars[j], leaf_idx_field_vars[i])?;
             let prev_a: Variable = active_vars[j].into();
             let cur_a: Variable = active_vars[i].into();
             let both_active = circuit.mul(prev_a, cur_a)?;
-            let eq_var: Variable = eq.into();
-            let bad = circuit.mul(both_active, eq_var)?;
-            circuit.enforce_constant(bad, Fr::from(0u64))?;
+
+            let eq_idx = circuit.is_equal(leaf_idx_field_vars[j], leaf_idx_field_vars[i])?;
+            let eq_idx_var: Variable = eq_idx.into();
+            let bad_idx = circuit.mul(both_active, eq_idx_var)?;
+            circuit.enforce_constant(bad_idx, Fr::from(0u64))?;
+
+            let eq_leaf = circuit.is_equal(leaf_vars[j], leaf_vars[i])?;
+            let eq_leaf_var: Variable = eq_leaf.into();
+            let bad_leaf = circuit.mul(both_active, eq_leaf_var)?;
+            circuit.enforce_constant(bad_leaf, Fr::from(0u64))?;
         }
     }
 
@@ -754,6 +773,87 @@ mod tests {
         let sks: Vec<Fr> = (1u64..=4).map(Fr::from).collect();
         let mut w = build_witness(&sks, 3, 42, K_MAX as u64, K_MAX, 5, 5);
         w.signers[1] = w.signers[0].clone();
+        let mut c = PlonkCircuit::<Fr>::new_turbo_plonk();
+        synthesize_democracy_update_quorum(&mut c, &w).unwrap();
+        assert!(c.check_circuit_satisfiability(&pi(&w)).is_err());
+    }
+
+    /// Same secret key seated at two distinct leaf positions in the
+    /// member tree: one signer can produce two valid Merkle openings
+    /// (different `leaf_idx`, different paths, both opening to the
+    /// same leaf value `Poseidon(sk)`). The leaf-index distinctness
+    /// gate alone would let this pass — K=2 ≥ 2 with a single signer
+    /// — collapsing the quorum to 1-of-N. The leaf-value distinctness
+    /// gate catches it.
+    #[test]
+    fn rejects_duplicate_secret_key_at_distinct_leaf_indices() {
+        let depth = 3usize;
+        // Build a tree where positions 0 and 2 both carry sk=1. The
+        // remaining slots are distinct so the rest of the tree is
+        // well-formed; only the duplication is the attack surface.
+        let dup_sk = Fr::from(1u64);
+        let sks: Vec<Fr> = vec![
+            dup_sk,
+            Fr::from(2u64),
+            dup_sk,
+            Fr::from(4u64),
+            Fr::from(5u64),
+            Fr::from(6u64),
+            Fr::from(7u64),
+            Fr::from(8u64),
+        ];
+        let (root, paths) = build_tree(&sks, depth);
+        let salt_oc_old = Fr::from(0x55u64);
+        let salt_oc_new = Fr::from(0x66u64);
+        let occ_old = poseidon_hash_two_v05(&Fr::from(5u64), &salt_oc_old);
+        let occ_new = poseidon_hash_two_v05(&Fr::from(5u64), &salt_oc_new);
+        let salt_old = [0xAAu8; 32];
+        let salt_new = [0xBBu8; 32];
+        let salt_old_fr = Fr::from_le_bytes_mod_order(&salt_old);
+        let salt_new_fr = Fr::from_le_bytes_mod_order(&salt_new);
+        let inner_old = poseidon_hash_two_v05(&root, &Fr::from(42u64));
+        let mid_old = poseidon_hash_two_v05(&inner_old, &salt_old_fr);
+        let c_old = poseidon_hash_two_v05(&mid_old, &occ_old);
+        let inner_new = poseidon_hash_two_v05(&root, &Fr::from(43u64));
+        let mid_new = poseidon_hash_two_v05(&inner_new, &salt_new_fr);
+        let c_new = poseidon_hash_two_v05(&mid_new, &occ_new);
+
+        // Both signer slots use the same `dup_sk` but reference the
+        // tree at distinct leaf positions (0 and 2), each with the
+        // genuine Merkle path for that position.
+        let signers: [DemocracySigner; K_MAX] = [
+            DemocracySigner {
+                secret_key: dup_sk,
+                merkle_path: paths[0].clone(),
+                leaf_index: 0,
+                active: true,
+            },
+            DemocracySigner {
+                secret_key: dup_sk,
+                merkle_path: paths[2].clone(),
+                leaf_index: 2,
+                active: true,
+            },
+        ];
+
+        let w = DemocracyUpdateQuorumWitness {
+            c_old,
+            epoch_old: 42,
+            c_new,
+            occupancy_commitment_old: occ_old,
+            occupancy_commitment_new: occ_new,
+            threshold_numerator: K_MAX as u64,
+            signers,
+            member_root_old: root,
+            member_root_new: root,
+            member_count_old: 5,
+            member_count_new: 5,
+            salt_oc_old,
+            salt_oc_new,
+            salt_old,
+            salt_new,
+            depth,
+        };
         let mut c = PlonkCircuit::<Fr>::new_turbo_plonk();
         synthesize_democracy_update_quorum(&mut c, &w).unwrap();
         assert!(c.check_circuit_satisfiability(&pi(&w)).is_err());
