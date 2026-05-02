@@ -406,7 +406,7 @@ pub unsafe extern "C" fn onym_anarchy_prove_membership(
             .map_err(|e| format!("finalize_for_arithmetization: {e:?}"))?;
 
         let keys = plonk::preprocess(&circuit).map_err(|e| format!("preprocess: {e:?}"))?;
-        let mut rng = rand_chacha::ChaCha20Rng::from_seed([0u8; 32]);
+        let mut rng = rand_chacha::ChaCha20Rng::from_entropy();
         let proof =
             plonk::prove(&mut rng, &keys.pk, &circuit).map_err(|e| format!("prove: {e:?}"))?;
 
@@ -562,7 +562,7 @@ pub unsafe extern "C" fn onym_anarchy_prove_update(
             .map_err(|e| format!("finalize_for_arithmetization: {e:?}"))?;
 
         let keys = plonk::preprocess(&circuit).map_err(|e| format!("preprocess: {e:?}"))?;
-        let mut rng = rand_chacha::ChaCha20Rng::from_seed([0u8; 32]);
+        let mut rng = rand_chacha::ChaCha20Rng::from_entropy();
         let proof =
             plonk::prove(&mut rng, &keys.pk, &circuit).map_err(|e| format!("prove: {e:?}"))?;
 
