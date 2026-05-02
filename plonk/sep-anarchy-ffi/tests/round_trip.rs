@@ -273,6 +273,59 @@ fn prove_membership_rejects_out_of_range_prover_index() {
 }
 
 #[test]
+fn prove_membership_null_second_output_does_not_publish_first() {
+    // Audit Finding 3 regression test: when one of the two output
+    // pointers is null, the function must fail BEFORE writing to
+    // the other output. Previously, write_buffer(out_proof, ...)
+    // succeeded then write_buffer(out_commitment, ...) failed,
+    // leaking the proof allocation to a caller that ignores
+    // outputs on `false`.
+    let secret_keys: Vec<Fr> = (1u64..=8).map(Fr::from).collect();
+    let leaves_packed = pack_leaf_hashes_from_secret_keys(&secret_keys);
+    let prover_sk_be = fr_be(&secret_keys[3]);
+    let salt = [0u8; 32];
+
+    // Pre-fill out_proof with a recognisable sentinel; the FFI must
+    // not touch it because the second output (out_commitment) is null.
+    let sentinel_ptr = 0xDEADBEEFusize as *mut u8;
+    let sentinel_len = 0x99999999usize;
+    let mut proof_buf = OnymByteBuffer {
+        ptr: sentinel_ptr,
+        len: sentinel_len,
+    };
+    let mut err: *mut std::os::raw::c_char = ptr::null_mut();
+    let ok = unsafe {
+        onym_anarchy_prove_membership(
+            5,
+            leaves_packed.as_ptr(),
+            leaves_packed.len(),
+            prover_sk_be.as_ptr(),
+            prover_sk_be.len(),
+            3,
+            0,
+            salt.as_ptr(),
+            salt.len(),
+            &mut proof_buf,
+            ptr::null_mut(), // out_commitment NULL — pre-validation must catch this
+            &mut err,
+        )
+    };
+    assert!(!ok, "expected failure when out_commitment pointer is null");
+    assert_eq!(
+        proof_buf.ptr, sentinel_ptr,
+        "out_proof was published before pre-validation rejected the call — partial-leak bug"
+    );
+    assert_eq!(proof_buf.len, sentinel_len);
+    assert!(!err.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
+    assert!(
+        msg.contains("out_commitment") || msg.contains("null"),
+        "expected null-output error, got: {msg}"
+    );
+    let _ = unsafe { std::ffi::CString::from_raw(err) };
+}
+
+#[test]
 fn prove_membership_rejects_mismatched_prover_secret_key() {
     // Sanity check: prover_secret_key MUST hash to leaf at prover_index.
     // A wrong sk surfaces here before the prover gets invoked, so the

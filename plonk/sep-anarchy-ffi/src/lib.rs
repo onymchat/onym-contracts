@@ -227,6 +227,17 @@ fn check_prover_leaf(
     Ok(())
 }
 
+/// Reject a null output-buffer pointer at the top of a multi-output
+/// prove function, BEFORE any allocation. Pairs with the
+/// "build-then-publish" pattern in `prove_*` so a `false` return
+/// never leaks a partially-written first output.
+fn check_output_ptr(ptr: *mut OnymByteBuffer, label: &str) -> Result<(), String> {
+    if ptr.is_null() {
+        return Err(format!("{label} pointer was null"));
+    }
+    Ok(())
+}
+
 fn pinned_hex_to_buffer(
     hex: Option<&'static str>,
     out_hex: *mut OnymByteBuffer,
@@ -350,6 +361,15 @@ pub unsafe extern "C" fn onym_anarchy_prove_membership(
     out_error: *mut *mut c_char,
 ) -> bool {
     run_ffi(out_error, || {
+        // Pre-validate output pointers BEFORE any allocation happens.
+        // The build-then-publish pattern below relies on these checks
+        // succeeding so the trailing publish step is infallible — a
+        // failed second publish would otherwise leak the first
+        // already-published buffer to a caller that ignores outputs
+        // on `false`.
+        check_output_ptr(out_proof, "out_proof")?;
+        check_output_ptr(out_commitment, "out_commitment")?;
+
         check_depth(depth)?;
         let leaves_packed = read_bytes(
             member_leaf_hashes_ptr,
@@ -429,8 +449,14 @@ pub unsafe extern "C" fn onym_anarchy_prove_membership(
             format!("self-verify rejected proof — witness or circuit shape is wrong: {e:?}")
         })?;
 
-        write_buffer(out_proof, proof_bytes)?;
-        write_buffer(out_commitment, fr_to_be_bytes(&commitment))?;
+        // Atomic publish: both output pointers were validated at the
+        // top, so these assignments are infallible (modulo allocator
+        // OOM panics in `into_boxed_slice`, which catch_unwind handles).
+        let commitment_bytes = fr_to_be_bytes(&commitment);
+        unsafe {
+            *out_proof = buffer_from_vec(proof_bytes);
+            *out_commitment = buffer_from_vec(commitment_bytes);
+        }
         Ok(())
     })
 }
@@ -482,6 +508,9 @@ pub unsafe extern "C" fn onym_anarchy_prove_update(
     out_error: *mut *mut c_char,
 ) -> bool {
     run_ffi(out_error, || {
+        check_output_ptr(out_proof, "out_proof")?;
+        check_output_ptr(out_public_inputs, "out_public_inputs")?;
+
         check_depth(depth)?;
         let leaves_old_packed = read_bytes(
             member_leaf_hashes_old_ptr,
@@ -589,8 +618,11 @@ pub unsafe extern "C" fn onym_anarchy_prove_update(
         pi_concat.extend_from_slice(&fr_to_be_bytes(&Fr::from(epoch_old)));
         pi_concat.extend_from_slice(&fr_to_be_bytes(&c_new));
 
-        write_buffer(out_proof, proof_bytes)?;
-        write_buffer(out_public_inputs, pi_concat)?;
+        // Atomic publish — see prove_membership for rationale.
+        unsafe {
+            *out_proof = buffer_from_vec(proof_bytes);
+            *out_public_inputs = buffer_from_vec(pi_concat);
+        }
         Ok(())
     })
 }

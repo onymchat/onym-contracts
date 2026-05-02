@@ -119,6 +119,17 @@ fn fr_to_be_bytes(fr: &Fr) -> Vec<u8> {
     fr.into_bigint().to_bytes_be()
 }
 
+/// Reject a null output-buffer pointer at the top of a multi-output
+/// prove function, BEFORE any allocation. Pairs with the
+/// "build-then-publish" pattern in `prove_*` so a `false` return
+/// never leaks a partially-written first output.
+fn check_output_ptr(ptr: *mut OnymByteBuffer, label: &str) -> Result<(), String> {
+    if ptr.is_null() {
+        return Err(format!("{label} pointer was null"));
+    }
+    Ok(())
+}
+
 /// Native Poseidon root over the 2-active-leaf depth-5 tree —
 /// positions 0 and 1 occupied; positions 2..32 hardwired zero.
 fn build_2of_depth5_root(sk_0: &Fr, sk_1: &Fr) -> Fr {
@@ -189,6 +200,11 @@ pub unsafe extern "C" fn onym_oneonone_prove_create(
     out_error: *mut *mut c_char,
 ) -> bool {
     run_ffi(out_error, || {
+        // Pre-validate output pointers before any allocation. See
+        // sep-anarchy-ffi's prove_membership for rationale.
+        check_output_ptr(out_proof, "out_proof")?;
+        check_output_ptr(out_commitment, "out_commitment")?;
+
         let sk_0 = fr_from_be(
             read_bytes(secret_key_0_ptr, secret_key_0_len, "secret_key_0")?,
             "secret_key_0",
@@ -240,8 +256,12 @@ pub unsafe extern "C" fn onym_oneonone_prove_create(
             format!("self-verify rejected proof — witness or circuit shape is wrong: {e:?}")
         })?;
 
-        write_buffer(out_proof, proof_bytes)?;
-        write_buffer(out_commitment, fr_to_be_bytes(&commitment))?;
+        // Atomic publish — output pointers validated above.
+        let commitment_bytes = fr_to_be_bytes(&commitment);
+        unsafe {
+            *out_proof = buffer_from_vec(proof_bytes);
+            *out_commitment = buffer_from_vec(commitment_bytes);
+        }
         Ok(())
     })
 }

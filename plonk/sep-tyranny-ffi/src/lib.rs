@@ -218,6 +218,17 @@ fn check_prover_leaf(
     Ok(())
 }
 
+/// Reject a null output-buffer pointer at the top of a multi-output
+/// prove function, BEFORE any allocation. Pairs with the
+/// "build-then-publish" pattern in `prove_*` so a `false` return
+/// never leaks a partially-written first output.
+fn check_output_ptr(ptr: *mut OnymByteBuffer, label: &str) -> Result<(), String> {
+    if ptr.is_null() {
+        return Err(format!("{label} pointer was null"));
+    }
+    Ok(())
+}
+
 fn pinned_hex_to_buffer(
     hex: Option<&'static str>,
     out_hex: *mut OnymByteBuffer,
@@ -336,6 +347,10 @@ pub unsafe extern "C" fn onym_tyranny_prove_create(
     out_error: *mut *mut c_char,
 ) -> bool {
     run_ffi(out_error, || {
+        // Pre-validate output pointers before any allocation.
+        check_output_ptr(out_proof, "out_proof")?;
+        check_output_ptr(out_public_inputs, "out_public_inputs")?;
+
         check_depth(depth)?;
         let leaves_packed = read_bytes(
             member_leaf_hashes_ptr,
@@ -421,8 +436,11 @@ pub unsafe extern "C" fn onym_tyranny_prove_create(
             pi_concat.extend_from_slice(&fr_to_be_bytes(fr));
         }
 
-        write_buffer(out_proof, proof_bytes)?;
-        write_buffer(out_public_inputs, pi_concat)?;
+        // Atomic publish — output pointers validated above.
+        unsafe {
+            *out_proof = buffer_from_vec(proof_bytes);
+            *out_public_inputs = buffer_from_vec(pi_concat);
+        }
         Ok(())
     })
 }
@@ -473,6 +491,10 @@ pub unsafe extern "C" fn onym_tyranny_prove_update(
     out_error: *mut *mut c_char,
 ) -> bool {
     run_ffi(out_error, || {
+        // Pre-validate output pointers before any allocation.
+        check_output_ptr(out_proof, "out_proof")?;
+        check_output_ptr(out_public_inputs, "out_public_inputs")?;
+
         check_depth(depth)?;
         let leaves_packed = read_bytes(
             member_leaf_hashes_old_ptr,
@@ -587,8 +609,11 @@ pub unsafe extern "C" fn onym_tyranny_prove_update(
             pi_concat.extend_from_slice(&fr_to_be_bytes(fr));
         }
 
-        write_buffer(out_proof, proof_bytes)?;
-        write_buffer(out_public_inputs, pi_concat)?;
+        // Atomic publish — output pointers validated above.
+        unsafe {
+            *out_proof = buffer_from_vec(proof_bytes);
+            *out_public_inputs = buffer_from_vec(pi_concat);
+        }
         Ok(())
     })
 }
