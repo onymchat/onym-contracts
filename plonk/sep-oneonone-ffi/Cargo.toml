@@ -1,0 +1,30 @@
+[package]
+name = "onym-sep-oneonone-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "Mobile-FFI for the SEP-OneOnOne contract type — bake_create_vk and prove_create. Single tier (depth=5). Consumed by onym-sdk-swift / onym-sdk-kotlin."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+onym-plonk-prover = { path = "../prover" }
+
+jf-plonk    = { git = "https://github.com/EspressoSystems/jellyfish", tag = "jf-plonk-v0.8.0",    default-features = false, features = ["std"] }
+jf-relation = { git = "https://github.com/EspressoSystems/jellyfish", tag = "jf-relation-v0.5.0", default-features = false, features = ["std"] }
+
+ark-bls12-381-v05 = { package = "ark-bls12-381", version = "0.5", default-features = false, features = ["curve"] }
+ark-ff-v05        = { package = "ark-ff",        version = "0.5", default-features = false, features = ["std"] }
+ark-serialize-v05 = { package = "ark-serialize", version = "0.5", default-features = false, features = ["std"] }
+
+rand_chacha = "0.3"
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
