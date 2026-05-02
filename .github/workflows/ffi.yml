@@ -26,14 +26,14 @@ on:
     paths:
       - 'plonk/sep-*-ffi/**'
       - 'plonk/prover/**'
-      - 'plonk/FFI-DESIGN.md'
+      - 'plonk/sep-*-ffi/README.md'
       - '.github/workflows/ffi.yml'
   push:
     branches: [main]
     paths:
       - 'plonk/sep-*-ffi/**'
       - 'plonk/prover/**'
-      - 'plonk/FFI-DESIGN.md'
+      - 'plonk/sep-*-ffi/README.md'
       - '.github/workflows/ffi.yml'
 
 permissions:
