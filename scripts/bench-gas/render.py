@@ -33,7 +33,8 @@ OP_ORDER = {
     "verify_membership": 2,
     "update_commitment": 3,
     "set_restricted_mode": 10,
-    "bump_group_ttl": 11,
+    "set_restricted_mode(false)": 11,
+    "bump_group_ttl": 12,
 }
 
 NETWORK_TO_EXPERT = {
