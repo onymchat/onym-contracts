@@ -51,6 +51,10 @@ by every other per-type FFI crate. Both `secret_key_0` and
 `secret_key_1` cross the FFI boundary together, by design. After
 create, neither key is ever needed again — the group is immutable.
 
+The FFI rejects `secret_key_0 == secret_key_1` to prevent one-person
+"1v1" groups (the upstream circuit doesn't enforce this gate today,
+so the FFI does).
+
 ## Compatibility note
 
 The commitment this returns is **bit-identical** to a depth-5 anarchy

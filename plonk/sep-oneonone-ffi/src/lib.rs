@@ -213,6 +213,19 @@ pub unsafe extern "C" fn onym_oneonone_prove_create(
             read_bytes(secret_key_1_ptr, secret_key_1_len, "secret_key_1")?,
             "secret_key_1",
         )?;
+        // Two-party founding requires two DISTINCT members. The
+        // upstream circuit doesn't enforce this today (a single
+        // member could produce a valid proof with sk_0 == sk_1 and
+        // create a one-person 1v1 group), so the FFI rejects up
+        // front. Reject by Fr equality — same secret key in BE
+        // bytes always reduces to the same Fr scalar, regardless of
+        // any byte-level encoding aliasing.
+        if sk_0 == sk_1 {
+            return Err(
+                "secret_key_0 == secret_key_1 — 1v1 group requires two distinct members"
+                    .to_string(),
+            );
+        }
         let salt_bytes = read_bytes(salt_ptr, salt_len, "salt")?;
         require_len("salt", salt_bytes.len(), SALT_BYTES)?;
         let mut salt: [u8; SALT_BYTES] = [0; SALT_BYTES];
