@@ -1,34 +1,30 @@
-//! Top-level FRI verifier glue. Mirrors `plonk_verifier::verifier`'s
-//! `verify` shape so the contract layer can swap flavors with only
-//! its `include_bytes!` paths and proof-arg width changing.
+//! Top-level FRI verifier glue.
 //!
 //! ## Flow
 //!
-//! 1. Parse the VK + proof bytes.
+//! 1. Parse VK + proof bytes.
 //! 2. Match the public-input count against the VK's declared `num_pi`.
-//! 3. Initialise a Poseidon2 sponge transcript with a domain separator
-//!    that pins:
-//!    - the VK's `pcs_pinned_root` (binds verifier to circuit),
-//!    - `(log_n, num_layers, num_queries, blowup_log)` (binds verifier
-//!      to FRI parameters),
-//!    - the `public_inputs` (binds verifier to claim).
+//! 3. Initialise a Poseidon2-BN254-t3 sponge transcript and bind:
+//!    - the VK's `pcs_pinned_root` (binds verifier to circuit-shape),
+//!    - `(log_n, num_layers, num_queries, blowup_log)`,
+//!    - the public inputs.
 //! 4. Hand off to `fri::verify_fri`.
 //!
 //! ## What's missing vs. a complete STARK verifier
 //!
-//! `verify_fri` proves "the prover committed to a polynomial of bounded
-//! degree." A real STARK verifier *also* checks that the polynomial
-//! satisfies the AIR constraints at the out-of-domain challenge `zeta`
-//! — which requires a batched-PCS layer (random linear combination of
-//! trace, quotient, and aux openings) on top of FRI. That layer is
-//! deferred to a follow-up `verifier_pcs.rs`. Without it, this
-//! verifier will accept FRI proofs whose underlying polynomial is
-//! low-degree but unrelated to any constraint system; do **not** ship
-//! the contracts behind this verifier without it.
+//! `verify_fri` proves "the prover committed to a low-degree
+//! polynomial". A real STARK verifier *also* checks the polynomial
+//! satisfies AIR constraints at the out-of-domain challenge `zeta`,
+//! via a batched-PCS layer of trace + quotient + aux openings. That
+//! layer is the **next** verifier file (`verifier_pcs.rs`) and is
+//! not yet built. Until it lands, do not deploy the contract behind
+//! this verifier — the FRI low-degree test alone does not bind
+//! to any circuit.
 
-use crate::field::Fr;
+use crate::field::{self, Fr};
 use crate::fri::{verify_fri, CommittedLayer, FriProof, FriVerifierParams, LayerOpening};
-use crate::merkle::{Digest, DIGEST_LEN};
+use crate::host_poseidon2::Poseidon2Ctx;
+use crate::merkle::Digest;
 use crate::proof_format::{parse_proof_bytes, ProofParseError};
 use crate::transcript::Transcript;
 use crate::vk_format::{parse_vk_bytes, VkParseError};
@@ -42,6 +38,7 @@ pub enum VerifyError {
     BadVk,
     BadProof,
     PublicInputsMismatch { expected: u32, actual: u32 },
+    NonCanonicalPi,
     FriRejected,
 }
 
@@ -57,52 +54,41 @@ impl From<ProofParseError> for VerifyError {
     }
 }
 
-/// Verify a FRI-flavor proof. Mirrors the shape of `plonk_verifier::
-/// verifier::verify`: bytes in, `Result<(), _>` out.
+/// Verify a FRI-flavor proof.
 ///
-/// `public_inputs` is `[[u8; 4]]` — each PI is one canonical BabyBear
-/// element little-endian. The contract layer above accepts the wider
-/// `BytesN<32>` PI form (for shape parity with the PLONK flavor) and
-/// reduces each PI down to its first 4 bytes here.
+/// `public_inputs_be` is `[[u8; 32]]` — each PI is one canonical BN254
+/// Fr in big-endian. The contract layer above passes
+/// `Vec<BytesN<32>>` directly through.
 pub fn verify(
     env: &Env,
     vk_bytes: &[u8],
     proof_bytes: &[u8],
-    public_inputs_le: &[[u8; 4]],
+    public_inputs_be: &[[u8; 32]],
 ) -> Result<(), VerifyError> {
-    let vk = parse_vk_bytes(vk_bytes)?;
-    let proof = parse_proof_bytes(proof_bytes)?;
+    let vk = parse_vk_bytes(env, vk_bytes)?;
+    let proof = parse_proof_bytes(env, proof_bytes)?;
 
-    if public_inputs_le.len() as u32 != vk.num_pi {
+    if public_inputs_be.len() as u32 != vk.num_pi {
         return Err(VerifyError::PublicInputsMismatch {
             expected: vk.num_pi,
-            actual: public_inputs_le.len() as u32,
+            actual: public_inputs_be.len() as u32,
         });
     }
 
-    // Build the FRI-shaped view of the parsed proof. This is a pure
-    // re-shape of the bytes already validated by the parser; the
-    // verifier itself runs over the borrowed `FriProof<'_>`.
+    // ---- Build the FRI-shaped view of the parsed proof. ----------
     let layers: Vec<CommittedLayer> = proof
         .layer_roots
         .iter()
-        .map(|r| CommittedLayer { root: *r })
+        .map(|r| CommittedLayer { root: r.clone() })
         .collect();
 
-    // Per-query openings: pair each query's `query_values` slot with
-    // the corresponding `query_paths_pos[q][i].leaf` (the Merkle leaf
-    // is the value digest). The leaf for layer `i` of query `q` is
-    // the 8-element padding of the `(pos, neg)` pair into a digest;
-    // see `leaf_digest_for` below.
     let mut openings_pos: Vec<Vec<LayerOpening>> = Vec::with_capacity(proof.query_values.len());
     let mut openings_neg: Vec<Vec<LayerOpening>> = Vec::with_capacity(proof.query_values.len());
     for q in 0..proof.query_values.len() {
-        let mut row_pos: Vec<LayerOpening> =
-            Vec::with_capacity(proof.query_values[q].len());
-        let mut row_neg: Vec<LayerOpening> =
-            Vec::with_capacity(proof.query_values[q].len());
+        let mut row_pos: Vec<LayerOpening> = Vec::with_capacity(proof.query_values[q].len());
+        let mut row_neg: Vec<LayerOpening> = Vec::with_capacity(proof.query_values[q].len());
         for i in 0..proof.query_values[q].len() {
-            let (pos, neg) = proof.query_values[q][i];
+            let (pos, neg) = proof.query_values[q][i].clone();
             row_pos.push(LayerOpening {
                 leaf: leaf_digest_for(pos),
                 siblings: &proof.query_paths_pos[q][i],
@@ -140,57 +126,50 @@ pub fn verify(
         two_inv: vk.two_inv,
     };
 
-    // ---- Initialise the transcript --------------------------------
-    let mut transcript = Transcript::new(env, b"onym-pq-fri-v1");
+    // ---- Initialise the Poseidon2 ctx + transcript. --------------
+    let ctx = Poseidon2Ctx::new(env);
+    let mut transcript = Transcript::new(env, &ctx, b"onym-pq-fri-v2");
+
     // Bind the circuit identity (preprocessed-trace root).
-    transcript.observe_slice(env, &vk.pcs_pinned_root);
+    transcript.observe(vk.pcs_pinned_root);
     // Bind the FRI shape parameters.
-    transcript.observe(env, Fr::new(vk.log_n));
-    transcript.observe(env, Fr::new(vk.num_layers));
-    transcript.observe(env, Fr::new(vk.num_queries));
-    transcript.observe(env, Fr::new(vk.blowup_log));
+    transcript.observe(field::from_u32(env, vk.log_n));
+    transcript.observe(field::from_u32(env, vk.num_layers));
+    transcript.observe(field::from_u32(env, vk.num_queries));
+    transcript.observe(field::from_u32(env, vk.blowup_log));
     // Bind the public claim.
-    for pi in public_inputs_le.iter() {
-        let v = u32::from_le_bytes(*pi);
-        if v >= crate::field::P {
-            return Err(VerifyError::BadProof);
+    for pi in public_inputs_be.iter() {
+        if !field::is_canonical_be(env, pi) {
+            return Err(VerifyError::NonCanonicalPi);
         }
-        transcript.observe(env, Fr(v));
+        transcript.observe(field::from_be_bytes(env, pi));
     }
 
-    verify_fri(env, &mut transcript, &fri_proof, &params)
+    verify_fri(env, &ctx, &mut transcript, &fri_proof, &params)
         .map_err(|_| VerifyError::FriRejected)?;
     Ok(())
 }
 
-/// Build a Merkle leaf digest from a single `Fr` value. Pads the lone
-/// value into a `DIGEST_LEN`-wide block: `[v, 0, 0, 0, 0, 0, 0, 0]`.
-/// The prover-side commitment must use the same padding for these
-/// authentication paths to verify.
-///
-/// (Plonky3's prover commits row-batches — multiple polynomials at
-/// each row coordinate — so its leaves are wider; the single-poly
-/// FRI here uses one-element rows.)
+/// Build a Merkle leaf digest from a single `Fr`. With t=3 + capacity 1
+/// the leaf hash is the value itself — the first compression layer
+/// of the tree handles the (sibling, sibling) pair.
 fn leaf_digest_for(v: Fr) -> Digest {
-    let mut d = [Fr::ZERO; DIGEST_LEN];
-    d[0] = v;
-    d
+    v
 }
 
-/// Used by the contract layer for its compile-time const-assert.
-pub const FR_LEN: usize = 4;
+/// Used by the contract layer for its compile-time assertions.
+pub const FR_LEN: usize = 32;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Wrong VK length short-circuits at `BadVk` before any other work.
     #[test]
     fn rejects_bad_vk_length() {
         let env = Env::default();
         let vk_bytes = [0u8; 16];
         let proof_bytes = [0u8; 16];
-        let pi: [[u8; 4]; 0] = [];
+        let pi: [[u8; 32]; 0] = [];
         assert_eq!(
             verify(&env, &vk_bytes, &proof_bytes, &pi),
             Err(VerifyError::BadVk),

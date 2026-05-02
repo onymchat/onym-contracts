@@ -1,88 +1,62 @@
-//! FRI-flavor proof byte layout.
+//! BN254-flavor FRI proof byte layout.
 //!
 //! ## Layout
 //!
-//! Variable-length, length-prefixed sections. Every count is `u32`
-//! little-endian; field elements are `u32` little-endian; digests
-//! are 8 × `u32` LE = 32 bytes. The on-chain entry surface accepts
-//! a `Bytes` blob (Soroban variable byte arg); this parser slices it
-//! into the structured `ParsedProof` the verifier consumes.
+//! Variable-length, length-prefixed sections. Counts are `u32` LE;
+//! field elements are 32-byte BN254 Fr **big-endian** (matching the
+//! SDK's `Fr::to_bytes` / `Fr::from_bytes` convention); digests are
+//! single Fr (32 bytes).
 //!
 //! ```text
-//!   [num_layers: u32]
-//!   [layer_root[0]: 32 B]
-//!   …
-//!   [layer_root[num_layers]: 32 B]      // num_layers + 1 commitments
+//!   [num_layers_plus_1: u32_le]
+//!   [layer_root[i]: 32 B]                  * (num_layers_plus_1)
 //!
-//!   [final_poly_len: u32]
-//!   [final_poly_coeff[0..final_poly_len]: 4 B each]
+//!   [final_poly_len: u32_le]
+//!   [final_poly_coef[k]: 32 B]             * (final_poly_len)
 //!
-//!   [num_queries: u32]
+//!   [num_queries: u32_le]
 //!   for q in 0..num_queries:
 //!       for i in 0..=num_layers:
-//!           [pos_value: 4 B]
-//!           [neg_value: 4 B]            // (only the first num_layers
-//!                                         layers carry a neg parent
-//!                                         in the fold; the final
-//!                                         layer's neg slot is unused
-//!                                         and parsed as zero)
+//!           [pos_value: 32 B]
+//!           [neg_value: 32 B]
 //!       for i in 0..=num_layers:
-//!           [path_len: u32]
-//!           [pos_siblings[0..path_len]: 32 B each]
-//!           [neg_siblings[0..path_len]: 32 B each]
+//!           [path_len: u32_le]
+//!           [pos_path[k]: 32 B]            * path_len
+//!           [neg_path[k]: 32 B]            * path_len
 //! ```
 //!
-//! ## Size budget
-//!
-//! For a depth-15 trace with 80 queries, ~10 fold layers, depth-15
-//! Merkle paths, the proof is roughly:
-//!
-//! ```text
-//!   layer_roots :  11 × 32     ≈    352 B
-//!   final_poly  :  ~16 × 4     ≈     64 B
-//!   per query   :  11 × 8 +
-//!                  11 × (32 × 15 × 2) ≈   ≈ 10.5 KB
-//!   80 queries  :              ≈   840 KB
-//! ```
-//!
-//! That's at the upper edge of Soroban's per-tx blob caps, so future
-//! tuning should consider folding factor 4 (cuts query work ~4×) and
-//! merkle-cap optimisations (cap at depth 4 → omit the first 4 levels
-//! of every path). Both are out of scope for this skeleton.
+//! Bench-scope params (log_n=6, num_layers=3, num_queries=8) produce
+//! ~10 KB proofs. Production parameters (log_n≥20, num_queries≈80)
+//! give proofs in the ~MB range; that's where the batched-PCS layer
+//! becomes essential, since a single FRI invocation under those
+//! parameters times 1 polynomial is comparable in cost to a single
+//! invocation times N polynomials when batched.
 
-use crate::field::{Fr, P};
-use crate::merkle::{Digest, DIGEST_LEN};
+use crate::field::{self, Fr};
+use crate::merkle::Digest;
 use alloc::vec::Vec;
+use soroban_sdk::Env;
 
 extern crate alloc;
+
+const FR_LEN: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParsedProof {
     pub layer_roots: Vec<Digest>,
     pub final_poly: Vec<Fr>,
-    /// Per query: (pos, neg) value pairs at each of the `num_layers + 1`
-    /// commitments. The neg slot at the final commitment is unused
-    /// (folding has terminated) and parsed as `Fr::ZERO`.
     pub query_values: Vec<Vec<(Fr, Fr)>>,
-    /// Per query: positive-parent Merkle authentication paths.
     pub query_paths_pos: Vec<Vec<Vec<Digest>>>,
-    /// Per query: negative-parent Merkle authentication paths.
     pub query_paths_neg: Vec<Vec<Vec<Digest>>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProofParseError {
-    /// Ran out of bytes mid-parse (truncated proof).
     Truncated,
-    /// A field-element byte sequence was ≥ P (not canonical).
     NonCanonicalField,
-    /// A length prefix exceeded the verifier's hard caps.
     OutOfRange,
 }
 
-/// Hard caps used to bound the parser's work. The verifier itself
-/// enforces tighter shape checks against the VK; these are
-/// resource-protection limits.
 const MAX_LAYERS: usize = 32;
 const MAX_QUERIES: usize = 256;
 const MAX_PATH_LEN: usize = 32;
@@ -107,35 +81,36 @@ impl<'a> Cursor<'a> {
         Ok(v)
     }
 
-    fn read_fr(&mut self) -> Result<Fr, ProofParseError> {
-        let v = self.read_u32()?;
-        if v >= P {
+    fn read_fr(&mut self, env: &Env) -> Result<Fr, ProofParseError> {
+        if self.pos + FR_LEN > self.buf.len() {
+            return Err(ProofParseError::Truncated);
+        }
+        let arr: [u8; FR_LEN] = self.buf[self.pos..self.pos + FR_LEN]
+            .try_into()
+            .unwrap();
+        if !field::is_canonical_be(env, &arr) {
             return Err(ProofParseError::NonCanonicalField);
         }
-        Ok(Fr(v))
+        self.pos += FR_LEN;
+        Ok(field::from_be_bytes(env, &arr))
     }
 
-    fn read_digest(&mut self) -> Result<Digest, ProofParseError> {
-        let mut d = [Fr::ZERO; DIGEST_LEN];
-        for i in 0..DIGEST_LEN {
-            d[i] = self.read_fr()?;
-        }
-        Ok(d)
+    fn read_digest(&mut self, env: &Env) -> Result<Digest, ProofParseError> {
+        self.read_fr(env)
     }
 }
 
-pub fn parse_proof_bytes(bytes: &[u8]) -> Result<ParsedProof, ProofParseError> {
+pub fn parse_proof_bytes(env: &Env, bytes: &[u8]) -> Result<ParsedProof, ProofParseError> {
     let mut c = Cursor::new(bytes);
 
     let num_layers_plus_1 = c.read_u32()? as usize;
     if num_layers_plus_1 == 0 || num_layers_plus_1 > MAX_LAYERS + 1 {
         return Err(ProofParseError::OutOfRange);
     }
-    let num_layers = num_layers_plus_1 - 1;
 
     let mut layer_roots = Vec::with_capacity(num_layers_plus_1);
     for _ in 0..num_layers_plus_1 {
-        layer_roots.push(c.read_digest()?);
+        layer_roots.push(c.read_digest(env)?);
     }
 
     let final_poly_len = c.read_u32()? as usize;
@@ -144,7 +119,7 @@ pub fn parse_proof_bytes(bytes: &[u8]) -> Result<ParsedProof, ProofParseError> {
     }
     let mut final_poly = Vec::with_capacity(final_poly_len);
     for _ in 0..final_poly_len {
-        final_poly.push(c.read_fr()?);
+        final_poly.push(c.read_fr(env)?);
     }
 
     let num_queries = c.read_u32()? as usize;
@@ -159,8 +134,8 @@ pub fn parse_proof_bytes(bytes: &[u8]) -> Result<ParsedProof, ProofParseError> {
     for _ in 0..num_queries {
         let mut values: Vec<(Fr, Fr)> = Vec::with_capacity(num_layers_plus_1);
         for _ in 0..num_layers_plus_1 {
-            let pos = c.read_fr()?;
-            let neg = c.read_fr()?;
+            let pos = c.read_fr(env)?;
+            let neg = c.read_fr(env)?;
             values.push((pos, neg));
         }
         query_values.push(values);
@@ -174,11 +149,11 @@ pub fn parse_proof_bytes(bytes: &[u8]) -> Result<ParsedProof, ProofParseError> {
             }
             let mut sibs_pos: Vec<Digest> = Vec::with_capacity(path_len);
             for _ in 0..path_len {
-                sibs_pos.push(c.read_digest()?);
+                sibs_pos.push(c.read_digest(env)?);
             }
             let mut sibs_neg: Vec<Digest> = Vec::with_capacity(path_len);
             for _ in 0..path_len {
-                sibs_neg.push(c.read_digest()?);
+                sibs_neg.push(c.read_digest(env)?);
             }
             paths_pos.push(sibs_pos);
             paths_neg.push(sibs_neg);
@@ -186,8 +161,6 @@ pub fn parse_proof_bytes(bytes: &[u8]) -> Result<ParsedProof, ProofParseError> {
         query_paths_pos.push(paths_pos);
         query_paths_neg.push(paths_neg);
     }
-
-    let _ = num_layers; // num_layers derived above; kept named for clarity.
 
     Ok(ParsedProof {
         layer_roots,
@@ -202,23 +175,22 @@ pub fn parse_proof_bytes(bytes: &[u8]) -> Result<ParsedProof, ProofParseError> {
 mod tests {
     use super::*;
 
-    /// Truncated bytes return `Truncated`.
     #[test]
     fn rejects_truncated() {
+        let env = Env::default();
         assert_eq!(
-            parse_proof_bytes(&[0u8; 2]),
+            parse_proof_bytes(&env, &[0u8; 2]),
             Err(ProofParseError::Truncated),
         );
     }
 
-    /// `num_layers + 1 == 0` is rejected (cannot decrement to a valid
-    /// num_layers).
     #[test]
     fn rejects_zero_layers() {
+        let env = Env::default();
         let mut buf = [0u8; 4];
         buf[0..4].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
-            parse_proof_bytes(&buf),
+            parse_proof_bytes(&env, &buf),
             Err(ProofParseError::OutOfRange),
         );
     }

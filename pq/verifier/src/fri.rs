@@ -1,115 +1,91 @@
-//! FRI low-degree test verifier (folding factor 2).
+//! FRI low-degree test verifier (folding factor 2) over BN254.
 //!
 //! ## Scope
 //!
-//! This module verifies a *single-polynomial* FRI proof: given a
-//! Merkle commitment to a codeword `f: D → F` over a coset `D` of
-//! size `n = 2^log_n`, and a sequence of fold challenges and
-//! commitments, attest that `f` is δ-close to a polynomial of degree
-//! `< n / blowup`.
+//! Same algorithm and same fold-equation as the BabyBear-based draft;
+//! the only field-specific change is that all arithmetic now happens
+//! through host-accelerated `BN254 Fr` operations and digests are
+//! single 32-byte field elements.
 //!
-//! Plonky3's full PCS verifier batches multiple polynomial openings
-//! into a single FRI invocation via a random linear combination at
-//! an out-of-domain point `zeta`. That batching layer is **not** in
-//! this module — see crate-level README. A future `verifier_pcs.rs`
-//! will sit between contract entry and `verify_fri`, taking the
-//! per-polynomial trace/quotient/aux commitments and reducing them
-//! to a single codeword commitment that this routine consumes.
+//! ## What this proves
+//!
+//! Given a Merkle commitment to a codeword `f: D → F` over a coset
+//! `D` of size `n = 2^log_n`, plus fold challenges and per-layer
+//! commitments, this verifies that `f` is δ-close to a polynomial
+//! of degree `< n / blowup`.
+//!
+//! ## Production note
+//!
+//! Standalone FRI does NOT prove circuit-binding. The verifier-PCS
+//! layer (forthcoming) reduces a multi-polynomial AIR-quotient claim
+//! to a single FRI invocation via random linear combination, and
+//! that's where AIR constraints get enforced. Until that layer
+//! lands, contracts using `verify_fri` directly should be considered
+//! research / bench, not production.
 //!
 //! ## Folding equation
 //!
 //! With folding factor 2 and a multiplicative subgroup domain whose
-//! `i`-th element is `ω^i`:
+//! `i`-th element is `ω^i`, at a query position `q` in layer `i`:
 //!
 //! ```text
-//!   f_{i+1}(x^2) = (f_i(x) + f_i(-x))/2 + β_i · (f_i(x) - f_i(-x))/(2x)
+//!   pos_idx = q mod (|D_i|/2)
+//!   neg_idx = pos_idx + |D_i|/2
+//!   p     = f_i[pos_idx]
+//!   p_neg = f_i[neg_idx]
+//!   f_{i+1}[pos_idx] = (p + p_neg) / 2
+//!                    + β_i · (p - p_neg) / (2 · ω_i^pos_idx)
 //! ```
 //!
-//! At a query index `q` in layer `i+1`, the consistency check pulls
-//! the two parents `(p, p_neg) = (f_i(q), f_i(q + n_i/2))` and tests:
-//!
-//! ```text
-//!   f_{i+1}(q) ?= (p + p_neg)/2 + β_i · (p - p_neg) / (2 · ω_i^q)
-//! ```
-//!
-//! `ω_i` is the layer-`i` domain generator: `ω_0` is the order-`n_0`
-//! root of unity, `ω_i = ω_0^(2^i)`.
+//! At layer i+1, the "carried" position is `pos_idx`. If `pos_idx <
+//! |D_{i+1}| / 2`, the value lives in layer i+1's lower half (slot
+//! `.0`); otherwise upper half (slot `.1`). Verifier picks the slot
+//! accordingly.
 
-use crate::field::Fr;
+use crate::field::{self, Fr};
+use crate::host_poseidon2::Poseidon2Ctx;
 use crate::merkle::{verify_path, Digest, MerkleError};
 use crate::transcript::Transcript;
 use soroban_sdk::Env;
 
-/// A single Merkle authentication-path opening at one query index.
-/// Same shape as `merkle::Digest` for the leaf, plus the sibling chain.
+/// One layer of the FRI proof: a Merkle root of `f_i: D_i → F`.
+#[derive(Clone, Debug)]
+pub struct CommittedLayer {
+    pub root: Digest,
+}
+
+/// Per-query, per-layer Merkle authentication-path opening.
 #[derive(Clone, Debug)]
 pub struct LayerOpening<'a> {
     pub leaf: Digest,
     pub siblings: &'a [Digest],
 }
 
-/// One layer of the FRI proof: a Merkle root of the codeword
-/// `f_i: D_i → F`, where the prover squeezed `β_{i-1}` from the
-/// transcript before committing.
-#[derive(Clone, Debug)]
-pub struct CommittedLayer {
-    pub root: Digest,
-}
-
-/// Complete FRI proof in verifier-consumable form. Constructed by the
-/// proof-bytes parser; this struct is the verifier's view.
-#[derive(Clone, Debug)]
+/// Complete FRI proof in verifier-consumable form.
 pub struct FriProof<'a> {
-    /// Initial codeword commitment. `layers[0].root` commits to
-    /// `f_0: D_0 → F`, |D_0| = 2^log_n.
     pub layers: &'a [CommittedLayer],
-    /// Per-query openings: queries[q][i] is the opening of `f_i` at
-    /// query `q`'s level-i index. Length: num_queries × num_layers.
     pub queries: &'a [&'a [LayerOpening<'a>]],
-    /// Per-query "negative" openings: same shape; openings of
-    /// `f_i(x + n_i/2)` (the other parent in the fold).
     pub queries_neg: &'a [&'a [LayerOpening<'a>]],
-    /// Field-element values at each query / layer / parent. The
-    /// Merkle leaves *commit* to these values; this slice carries
-    /// them in unhashed form so the fold equation can be evaluated.
-    /// Shape: num_queries × num_layers × 2 (positive parent, then
-    /// negative parent).
     pub query_values: &'a [&'a [(Fr, Fr)]],
-    /// Final-polynomial coefficients (degree < final_poly_degree).
-    /// In typical FRI, log_n - num_layers is small enough that the
-    /// final polynomial fits in a handful of field elements and is
-    /// shipped in the clear.
     pub final_poly: &'a [Fr],
 }
 
 /// Verifier-side parameters that pin the proof's expected shape.
 #[derive(Clone, Debug)]
 pub struct FriVerifierParams {
-    /// log2 of the initial domain size. n_0 = 2^log_n.
     pub log_n: u32,
-    /// Number of fold layers (each halves the domain).
     pub num_layers: u32,
-    /// Number of independent queries.
     pub num_queries: u32,
-    /// Generator `ω_0` of the order-`2^log_n` subgroup.
     pub omega_0: Fr,
-    /// `omega_0^{-1}` precomputed (avoids one inversion at verify time).
     pub omega_0_inv: Fr,
-    /// Two-inverse `1/2 mod P` precomputed (used in the fold equation).
     pub two_inv: Fr,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum FriError {
-    /// Proof shape doesn't match params (layer count, query count,
-    /// or per-query opening count diverged).
     BadShape,
-    /// A Merkle authentication path failed to verify.
     Merkle(MerkleError),
-    /// The fold equation rejected at some (query, layer) pair.
     FoldMismatch,
-    /// The final-layer evaluation didn't match the polynomial the
-    /// prover shipped in the clear.
     FinalLayerMismatch,
 }
 
@@ -121,21 +97,15 @@ impl From<MerkleError> for FriError {
 
 /// Verify a FRI proof against a transcript that has already absorbed
 /// any preceding context (PCS commitments, public inputs, …).
-///
-/// The transcript MUST be in absorb mode at entry; this routine
-/// drives the absorb-then-squeeze pattern itself: it absorbs each
-/// layer's root, squeezes that layer's β, then squeezes the query
-/// indices after the final layer is absorbed.
 pub fn verify_fri(
     env: &Env,
-    transcript: &mut Transcript,
+    ctx: &Poseidon2Ctx,
+    transcript: &mut Transcript<'_>,
     proof: &FriProof,
     params: &FriVerifierParams,
 ) -> Result<(), FriError> {
     // ---- Shape gates --------------------------------------------------
     if proof.layers.len() as u32 != params.num_layers + 1 {
-        // layers[0] is the initial commitment; layers[1..] are post-
-        // fold commitments, one per fold step → num_layers + 1 total.
         return Err(FriError::BadShape);
     }
     if proof.queries.len() as u32 != params.num_queries
@@ -145,8 +115,6 @@ pub fn verify_fri(
         return Err(FriError::BadShape);
     }
     for q in 0..(params.num_queries as usize) {
-        // Per-query openings count: one per layer (each layer has its
-        // own Merkle commitment, so its own opening).
         if proof.queries[q].len() as u32 != params.num_layers + 1
             || proof.queries_neg[q].len() as u32 != params.num_layers + 1
             || proof.query_values[q].len() as u32 != params.num_layers + 1
@@ -156,41 +124,31 @@ pub fn verify_fri(
     }
 
     // ---- Reconstruct β challenges from the transcript ---------------
-    //
-    // Verifier mirrors prover: absorb layer i's root, squeeze β_i, then
-    // expect the prover's layer i+1 root in the next absorb step.
     let mut betas: alloc::vec::Vec<Fr> =
         alloc::vec::Vec::with_capacity(params.num_layers as usize);
     {
         // Absorb the initial commitment.
-        for x in proof.layers[0].root.iter() {
-            transcript.observe(env, *x);
-        }
+        transcript.observe(proof.layers[0].root.clone());
         for i in 0..(params.num_layers as usize) {
-            let beta = transcript.challenge_nonzero(env);
+            let beta = transcript.challenge_nonzero();
             betas.push(beta);
             // Absorb f_{i+1}'s commitment.
-            for x in proof.layers[i + 1].root.iter() {
-                transcript.observe(env, *x);
-            }
+            transcript.observe(proof.layers[i + 1].root.clone());
         }
     }
 
-    // ---- Absorb the final polynomial, then squeeze query indices ----
-    transcript.observe_slice(env, proof.final_poly);
+    // ---- Absorb final polynomial, then squeeze query indices --------
+    transcript.observe_slice(proof.final_poly);
     let n_initial = 1usize << params.log_n;
 
     // ---- Per-query check --------------------------------------------
     for q in 0..(params.num_queries as usize) {
-        // Random initial index in `[0, n_0)`.
-        let idx0 = transcript.challenge_index(env, n_initial);
+        let idx0 = transcript.challenge_index(n_initial);
 
         let mut idx = idx0;
         let mut layer_size = n_initial;
-        // Generator of the layer-i domain. ω_0 = params.omega_0;
-        // ω_{i+1} = ω_i^2.
-        let mut omega = params.omega_0;
-        let mut omega_inv = params.omega_0_inv;
+        let mut omega = params.omega_0.clone();
+        let mut omega_inv = params.omega_0_inv.clone();
 
         for i in 0..(params.num_layers as usize) {
             let half = layer_size / 2;
@@ -202,6 +160,7 @@ pub fn verify_fri(
             let opening_neg = &proof.queries_neg[q][i];
             verify_path(
                 env,
+                ctx,
                 &opening_pos.leaf,
                 pos_idx as u64,
                 opening_pos.siblings,
@@ -209,49 +168,37 @@ pub fn verify_fri(
             )?;
             verify_path(
                 env,
+                ctx,
                 &opening_neg.leaf,
                 neg_idx as u64,
                 opening_neg.siblings,
                 &proof.layers[i].root,
             )?;
 
-            // The leaf bytes commit to the (Fr, Fr) value pair the
-            // prover shipped in `query_values`. Tying the two together
-            // is the parser's job (via leaf-hash recomputation) — this
-            // verifier expects them already linked. See `proof_format`.
-            let (p, p_neg) = proof.query_values[q][i];
-
             // Fold equation:
-            //   f_{i+1}(x^2) = (p + p_neg)/2 + β_i · (p - p_neg)/(2 · ω_i^pos_idx)
-            //
-            // ω_i^pos_idx is the x-coordinate at the positive parent.
-            // Note the formula is the same for queries in either half
-            // of layer i: when the original query was in the upper
-            // half (`idx >= half`), the negation `-x = ω_i^(pos_idx +
-            // half)` causes `(-1) · (1/-x)` to cancel, leaving the
-            // identical expression in pos_idx terms.
+            //   f_{i+1}(x²) = (p + p_neg)/2 + β·(p - p_neg)/(2·ω_i^pos_idx)
+            // The formula is correct for queries in either half:
+            // when the query is in the upper half, the negation
+            // `-x = ω_i^(pos_idx + half)` cancels the `-1` from
+            // `1/-x`, leaving the same expression in pos_idx terms.
+            let (p, p_neg) = proof.query_values[q][i].clone();
+
             let omega_at_pos = omega.pow(pos_idx as u64);
-            let omega_at_pos_inv = omega_at_pos.inverse();
+            let omega_at_pos_inv = omega_at_pos.inv();
 
-            let sum = p + p_neg;
+            let sum = p.clone() + p_neg.clone();
             let diff = p - p_neg;
-            let beta = betas[i];
-            let folded = (sum * params.two_inv)
-                + beta * (diff * params.two_inv * omega_at_pos_inv);
+            let beta = betas[i].clone();
+            let folded = (sum * params.two_inv.clone())
+                + beta * (diff * params.two_inv.clone() * omega_at_pos_inv);
 
-            // `folded = f_{i+1}[pos_idx]` — the position at layer i+1
-            // is the *carried* pos_idx, NOT pos_idx mod half_{i+1}.
-            // Layer i+1 has size `half`, so its half is `half/2`. If
-            // `pos_idx < half/2`, the carried position is in layer
-            // i+1's lower half and matches `query_values[q][i+1].0`;
-            // otherwise it's in the upper half and matches `.1`. (The
-            // prover stores layer i+1's openings sub-mirrored the
-            // same way layer i's are.)
+            // Pick layer-i+1 slot based on whether pos_idx lands in
+            // the lower or upper half of layer i+1.
             let half_next = half / 2;
             let next_value = if pos_idx < half_next {
-                proof.query_values[q][i + 1].0
+                proof.query_values[q][i + 1].0.clone()
             } else {
-                proof.query_values[q][i + 1].1
+                proof.query_values[q][i + 1].1.clone()
             };
             if folded != next_value {
                 return Err(FriError::FoldMismatch);
@@ -260,33 +207,28 @@ pub fn verify_fri(
             // Step to the next layer.
             idx = pos_idx;
             layer_size = half;
-            omega = omega * omega;
-            omega_inv = omega_inv * omega_inv;
+            omega = omega.clone() * omega;
+            omega_inv = omega_inv.clone() * omega_inv;
         }
 
-        // Final-layer check: `idx ∈ [0, layer_size)` is the carried
-        // position at the final layer, and the Horner evaluation of
-        // `proof.final_poly` at `ω_final^idx` should equal the
-        // queried final-layer value. The prover sub-mirrors the
-        // final layer the same way as the fold layers, so we pick
-        // `.0` or `.1` based on which half `idx` lands in.
+        // Final-layer check: idx is the carried position. Pick `.0`
+        // or `.1` based on which half it lands in, then Horner-eval
+        // `final_poly` at `ω_final^idx`.
         let final_x = omega.pow(idx as u64);
-        let mut acc = Fr::ZERO;
+        let mut acc = field::zero(env);
         for c in proof.final_poly.iter().rev() {
-            acc = acc * final_x + *c;
+            acc = acc * final_x.clone() + c.clone();
         }
         let half_final = layer_size / 2;
         let claimed = if idx < half_final {
-            proof.query_values[q][params.num_layers as usize].0
+            proof.query_values[q][params.num_layers as usize].0.clone()
         } else {
-            proof.query_values[q][params.num_layers as usize].1
+            proof.query_values[q][params.num_layers as usize].1.clone()
         };
         if acc != claimed {
             return Err(FriError::FinalLayerMismatch);
         }
-        let _ = omega_inv; // omega_inv isn't strictly needed here —
-                           // kept in scope for future batched-PCS work
-                           // that will need ω_i^{-1} to reuse this loop.
+        let _ = omega_inv; // kept for future PCS-batched-FRI use
     }
 
     Ok(())
@@ -302,26 +244,32 @@ mod tests {
     #[test]
     fn rejects_wrong_layer_count() {
         let env = Env::default();
-        let mut t = Transcript::new(&env, b"fri");
+        let ctx = Poseidon2Ctx::new(&env);
+        let mut t = Transcript::new(&env, &ctx, b"fri");
         let layers: alloc::vec::Vec<CommittedLayer> = alloc::vec::Vec::new();
         let queries: alloc::vec::Vec<&[LayerOpening]> = alloc::vec::Vec::new();
         let queries_neg: alloc::vec::Vec<&[LayerOpening]> = alloc::vec::Vec::new();
         let query_values: alloc::vec::Vec<&[(Fr, Fr)]> = alloc::vec::Vec::new();
+        let final_poly: alloc::vec::Vec<Fr> = alloc::vec::Vec::new();
         let proof = FriProof {
             layers: &layers,
             queries: &queries,
             queries_neg: &queries_neg,
             query_values: &query_values,
-            final_poly: &[],
+            final_poly: &final_poly,
         };
+        let three = field::from_u32(&env, 3);
         let params = FriVerifierParams {
             log_n: 4,
             num_layers: 2,
             num_queries: 1,
-            omega_0: Fr::new(2),
-            omega_0_inv: Fr::new(2).inverse(),
-            two_inv: Fr::new(2).inverse(),
+            omega_0: three.clone(),
+            omega_0_inv: three.inv(),
+            two_inv: field::from_u32(&env, 2).inv(),
         };
-        assert_eq!(verify_fri(&env, &mut t, &proof, &params), Err(FriError::BadShape));
+        assert_eq!(
+            verify_fri(&env, &ctx, &mut t, &proof, &params),
+            Err(FriError::BadShape),
+        );
     }
 }

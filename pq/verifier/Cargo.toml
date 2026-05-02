@@ -18,10 +18,17 @@ doctest = false
 #
 # rustc floor: 1.91.0 (per soroban-sdk 26's Cargo.toml).
 [dependencies]
-soroban-sdk = "=26.0.0-rc.1"
+# `hazmat-crypto` exposes `Env::crypto_hazmat()` and the underlying
+# `CryptoHazmat::poseidon2_permutation` host-fn binding. The Poseidon2
+# primitive is gated as "hazmat" because callers are responsible for
+# supplying secure params (round constants, internal-diagonal matrix).
+# We vendor the canonical Horizen Labs BN254 t=3 instance — same
+# constants the host primitive's own validation tests use — see
+# `poseidon2_params.rs` for provenance.
+soroban-sdk = { version = "=26.0.0-rc.1", features = ["hazmat-crypto"] }
 
 [dev-dependencies]
-soroban-sdk = { version = "=26.0.0-rc.1", features = ["testutils"] }
+soroban-sdk = { version = "=26.0.0-rc.1", features = ["hazmat-crypto", "testutils"] }
 
 [profile.release]
 opt-level = "z"

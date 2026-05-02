@@ -3,55 +3,51 @@
 //!
 //! ## Status
 //!
-//! **Skeleton.** This crate compiles and exercises the verifier
-//! shape end-to-end, but it is **not** yet sufficient to ship behind
-//! a sep-* contract:
+//! **Phase 1 (crypto primitives) complete; Phase 2 (AIR + batched-PCS
+//! layer) outstanding.** The verifier today proves "the prover
+//! committed to a low-degree polynomial via FRI" using the canonical
+//! Soroban Poseidon2 host primitive over BN254. That is the
+//! foundation for a production-grade STARK verifier on Soroban, but
+//! it is **not by itself** a circuit-binding verifier — landing a
+//! production contract behind it requires the batched-PCS layer that
+//! ties FRI to an AIR (next phase).
 //!
-//! 1. **No batched-PCS layer.** The on-chain `verify(...)` runs the
-//!    FRI low-degree test alone — it attests "this prover committed
-//!    to a polynomial of bounded degree" but does not check that
-//!    polynomial against any AIR constraint system. A future
-//!    `verifier_pcs` module will do the constraint-quotient batching
-//!    on top of `fri::verify_fri`.
+//! What's done:
+//! - BN254 scalar field via `soroban_sdk::crypto::bn254::Fr` (host-
+//!   accelerated `fr_add`/`mul`/`pow`/`inv`).
+//! - Poseidon2 t=3 via `env.crypto().poseidon2_permutation` with the
+//!   canonical Horizen Labs constants vendored from
+//!   `soroban-env-host`'s own validation tests.
+//! - Sponge transcript (rate=2, capacity=1).
+//! - Binary Merkle path verifier (2-to-1 compression).
+//! - FRI low-degree test (folding factor 2).
 //!
-//! 2. **No prover-side fixtures.** `plonk-verifier` ships
-//!    `tests/fixtures/*.bin` produced by an off-chain prover whose
-//!    test, run with `STELLAR_REGEN_FIXTURES=1`, double-acts as a
-//!    drift detector. The PQ flavor has no analogous prover yet, so
-//!    no `accepts_canonical_proof` test exists. `cargo test` covers
-//!    field arithmetic, transcript determinism, Merkle path verify,
-//!    proof/VK byte parsing, and `BadShape` / `BadVk` reject paths
-//!    only.
-//!
-//! 3. **Software Poseidon2 fallback uses placeholder constants.**
-//!    `host_poseidon2::permute` routes to the Soroban host primitive
-//!    on-chain; off-chain test paths fall through to
-//!    `poseidon2_software`, which has the right round shape but
-//!    filler round constants. When the host primitive's SDK surface
-//!    is finalised — the wrapper in `host_poseidon2.rs` is the only
-//!    file that needs editing — the on-chain path becomes byte-
-//!    equivalent to the Plonky3 prover; the software fallback can
-//!    be replaced with the canonical Plonky3 BabyBear-W16 constants
-//!    so that off-chain unit tests match prover-emitted bytes too.
-//!
-//! See `README.md` for the planned roadmap to closing all three.
+//! What's outstanding (`pq/verifier_pcs.rs` follow-up):
+//! - Batched polynomial commitment with out-of-domain opening at
+//!   `zeta`, random-linear-combination of trace + quotient + aux
+//!   openings, then dispatch to `verify_fri` on the combined
+//!   polynomial.
+//! - A real AIR for the membership / update circuits (Merkle-path-
+//!   verify under Poseidon2-BN254-t3).
+//! - Production FRI parameters (log_n ≥ 20, ~80 queries).
+//! - Prover-side fixtures + drift-detector test (mirroring the PLONK
+//!   flavor's `STELLAR_REGEN_FIXTURES` pattern).
 //!
 //! ## Layout
 //!
 //! ```text
-//!   field            BabyBear (p = 2^31 - 2^27 + 1) prime field
-//!   host_poseidon2   single point of contact with the Soroban
-//!                    Poseidon2-W16 host primitive (one wrapper
-//!                    function; falls through to a software
-//!                    reference in non-wasm builds)
-//!   poseidon2_software   off-chain reference for the host primitive
-//!   transcript       Fiat-Shamir sponge (rate 8, capacity 8)
-//!   merkle           binary Merkle authentication path verifier
-//!                    (Poseidon2 2-to-1 compression)
-//!   fri              FRI low-degree test (folding factor 2)
-//!   vk_format        verifying-key byte parser
-//!   proof_format     proof byte parser
-//!   verifier         top-level `verify(env, vk, proof, pi)` glue
+//!   field             BN254 Fr facade over `soroban_sdk::crypto::bn254`
+//!   poseidon2_params  canonical Horizen Labs t=3 round constants +
+//!                     internal-diagonal matrix (vendored verbatim)
+//!   host_poseidon2    `Poseidon2Ctx` cache + thin call into
+//!                     `env.crypto().poseidon2_permutation`
+//!   transcript        Fiat-Shamir sponge (rate=2, capacity=1)
+//!   merkle            binary Merkle authentication path verifier
+//!                     (2-to-1 compression via t=3 Poseidon2)
+//!   fri               FRI low-degree test (folding factor 2)
+//!   vk_format         verifying-key byte parser
+//!   proof_format      proof byte parser
+//!   verifier          top-level `verify(env, vk, proof, pi)` glue
 //! ```
 
 #![no_std]
@@ -62,7 +58,7 @@ pub mod field;
 pub mod fri;
 pub mod host_poseidon2;
 pub mod merkle;
-pub mod poseidon2_software;
+pub mod poseidon2_params;
 pub mod proof_format;
 pub mod transcript;
 pub mod verifier;

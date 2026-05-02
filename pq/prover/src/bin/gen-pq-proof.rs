@@ -1,31 +1,20 @@
 //! `gen-pq-proof` — emit a FRI proof + bench-compatible artefacts.
 //!
 //! Output files (drop-in compatible with `lib.sh`'s
-//! `bench_gen_proof_hex` / `bench_gen_pi_json` / `bench_gen_commitment_hex`
-//! helpers used by the PLONK bench drivers):
+//! `bench_gen_proof_hex` / `bench_gen_pi_json` / `bench_gen_commitment_hex`):
 //!   - `proof.bin`            raw FRI proof bytes
 //!   - `proof.hex`            same, hex-encoded one line
-//!   - `commitment.hex`       32-byte commitment (membership) or c_new (update)
+//!   - `commitment.hex`       32-byte commitment (membership) or c_old (update)
 //!   - `public_inputs.json`   `["<32-byte hex>", …]`
 //!
 //! ## Circuits
 //!
 //! * `--circuit membership` — 2 PIs: `(commitment, epoch)`.
-//!   Membership proofs are used by `create_group` (epoch=0) and
-//!   `verify_membership` (epoch=current).
-//! * `--circuit update` — 3 PIs: `(c_old, epoch_old, c_new)`.
+//! * `--circuit update`     — 3 PIs: `(c_old, epoch_old, c_new)`.
 //!
-//! The on-chain verifier checks public-input equality with what the
-//! contract stored, so the args here must match what the bench
-//! driver passes to the contract entrypoint.
-//!
-//! ## Bench-only safety note
-//!
-//! This prover is **not** a circuit-binding prover — it produces
-//! self-consistent FRI proofs that verify under the on-chain
-//! verifier's *low-degree* check, but without a batched-PCS layer
-//! tying FRI to an AIR there is no constraint system. Use only for
-//! gas measurement.
+//! Each PI is a single 32-byte BN254 Fr (BE-encoded). Inputs ≥ r are
+//! rejected at the contract surface; this tool emits bytes that are
+//! already canonical so callers can round-trip without surprises.
 
 use clap::Parser;
 use pq_fri_prover::fri_prover::prove;
@@ -44,22 +33,19 @@ enum Circuit {
 #[derive(Parser, Debug)]
 #[command(about = "PQ FRI proof generator (bench-only)")]
 struct Args {
-    /// Membership = 2 PIs (commitment, epoch). Update = 3 PIs.
+    /// `membership` (2 PIs) or `update` (3 PIs).
     #[arg(long, value_enum)]
     circuit: Circuit,
 
-    /// `commitment` for membership. Required for both circuits — for
-    /// update, this is `c_old` (must equal the contract's stored
-    /// commitment for that group).
+    /// `commitment` (membership) or `c_old` (update). 32 hex bytes.
     #[arg(long, value_parser = parse_hex32)]
     commitment: [u8; 32],
 
-    /// `epoch` (membership) or `epoch_old` (update). Hex bytes,
-    /// 32-byte BE u64 layout (matches `be32_from_u64`).
+    /// `epoch` (membership) or `epoch_old` (update). u64.
     #[arg(long, default_value = "0", value_parser = parse_u64)]
     epoch: u64,
 
-    /// `c_new` — only used for `--circuit update`.
+    /// `c_new` — only used for `--circuit update`. 32 hex bytes.
     #[arg(long, value_parser = parse_hex32)]
     new_commitment: Option<[u8; 32]>,
 
@@ -91,25 +77,6 @@ fn be32_from_u64(value: u64) -> [u8; 32] {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&value.to_be_bytes());
     bytes
-}
-
-fn pi_to_le_lanes(pi: &[u8; 32]) -> [[u8; 4]; 8] {
-    let mut out = [[0u8; 4]; 8];
-    for j in 0..8 {
-        let off = j * 4;
-        out[j].copy_from_slice(&pi[off..off + 4]);
-    }
-    out
-}
-
-fn flatten_pi(pis: &[[u8; 32]]) -> Vec<[u8; 4]> {
-    let mut out = Vec::with_capacity(pis.len() * 8);
-    for pi in pis.iter() {
-        for lane in pi_to_le_lanes(pi).iter() {
-            out.push(*lane);
-        }
-    }
-    out
 }
 
 fn json_array(pis: &[[u8; 32]]) -> String {
@@ -152,10 +119,12 @@ fn main() -> ExitCode {
         }
     };
 
-    let pi_le = flatten_pi(&pis);
-
     let env = Env::default();
-    let witness = prove(&env, &pi_le);
+    // Off-chain bench prep runs unmetered: the prover is an external
+    // binary, the budget is only meaningful on the on-chain verifier
+    // side (which the contract bench measures separately).
+    env.cost_estimate().budget().reset_unlimited();
+    let witness = prove(&env, &pis);
     let proof_bytes = serialize_proof(&witness);
 
     if let Err(e) = fs::create_dir_all(&args.out_dir) {

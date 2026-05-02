@@ -1,4 +1,4 @@
-//! SEP Anarchy Soroban Contract — PQ flavor (FRI / Plonky3-shape).
+//! SEP Anarchy Soroban Contract — PQ flavor (FRI / BN254).
 //!
 //! Mirrors `plonk/sep-anarchy/src/lib.rs` shape-for-shape:
 //! - same `DataKey`, `Error`, `CommitmentEntry`, event types,
@@ -9,22 +9,24 @@
 //! - same restricted-mode + admin model.
 //!
 //! Differences vs. PLONK flavor:
-//! - Verifier reaches into `env.crypto()` for the Poseidon2-W16 host
-//!   primitive instead of the BLS12-381 host primitive.
-//! - Proof bytes are a variable-length `Bytes` (FRI proof sizes scale
-//!   with query count × layer count × Merkle path depth — they don't
-//!   fit a single `BytesN<N>` cleanly across tiers).
-//! - VKs are 64-byte FRI verifying keys, not the multi-KB PLONK VKs.
-//! - Public inputs decompose `BytesN<32>` into 8 little-endian
-//!   BabyBear elements per PI; the verifier flattens this to a
-//!   `[[u8; 4]]` slice.
+//! - Verifier reaches into `env.crypto_hazmat().poseidon2_permutation`
+//!   (Soroban Protocol 26+ host primitive) with vendored Horizen
+//!   Labs canonical Poseidon2-BN254-t3 constants, instead of the
+//!   BLS12-381 pairing primitive.
+//! - Field is BN254 Fr — same byte width as the PLONK flavor's
+//!   BLS12-381 Fr (32 bytes BE), so PI shape is unchanged at the
+//!   client API surface.
+//! - Proof bytes are variable-length `Bytes` (FRI proofs scale with
+//!   query count × layer count × Merkle path depth).
 //!
-//! See `fri-verifier` crate-level docs for the open-work list:
-//! prover-side fixtures, batched-PCS layer, canonical Poseidon2
-//! constants. Until those land, the verifier in this contract should
-//! be treated as a skeleton — it will reject proofs malformed at the
-//! byte/shape level, but a real ship-ready contract requires the
-//! batched-PCS layer landing on top of `fri::verify_fri`.
+//! ## Status
+//!
+//! **Phase 1 (crypto primitives) only.** The verifier today runs
+//! the FRI low-degree test using audited host primitives — this
+//! gives correct cryptographic foundations but does NOT yet check
+//! AIR constraints. The batched-PCS layer that ties FRI to a
+//! constraint system is the gating dependency for production
+//! deployment; do not deploy this contract without it.
 
 #![no_std]
 
@@ -36,6 +38,7 @@ use soroban_sdk::{
     Address, Bytes, BytesN, Env, Vec,
 };
 
+use fri_verifier::field;
 use fri_verifier::verifier::verify as fri_verify;
 use fri_verifier::vk_format::VK_LEN;
 
@@ -48,28 +51,17 @@ const LEDGER_THRESHOLD: u32 = 17_280;
 const LEDGER_BUMP: u32 = 518_400;
 const MAX_GROUPS_PER_TIER: u32 = 10_000;
 
-/// Membership-circuit public inputs: `(commitment, epoch)` —
-/// 2 × BytesN<32> at the contract surface, decomposed to
-/// 2 × 8 = 16 BabyBear elements at the verifier surface.
+/// Membership-circuit public inputs: `(commitment, epoch)`.
+/// Each PI is one BN254 Fr (32 bytes BE) — same convention as the
+/// PLONK flavor's BLS12-381 Fr PIs, so client code is symmetric.
 const MEMBERSHIP_PI_COUNT: u32 = 2;
 /// Update-circuit public inputs: `(c_old, epoch_old, c_new)`.
 const UPDATE_PI_COUNT: u32 = 3;
 
-/// Each `BytesN<32>` PI carries 8 BabyBear elements (4 bytes each, LE).
-const BABYBEAR_ELEMENTS_PER_PI: usize = 8;
-/// Total BabyBear elements the verifier sees for a membership proof.
-const VERIFIER_PI_COUNT_MEMBERSHIP: usize =
-    MEMBERSHIP_PI_COUNT as usize * BABYBEAR_ELEMENTS_PER_PI;
-/// Total BabyBear elements the verifier sees for an update proof.
-const VERIFIER_PI_COUNT_UPDATE: usize =
-    UPDATE_PI_COUNT as usize * BABYBEAR_ELEMENTS_PER_PI;
-/// Upper bound on the verifier-side PI buffer.
-const MAX_VERIFIER_PI: usize = VERIFIER_PI_COUNT_UPDATE;
-
-/// Hard cap on accepted proof size (bytes). FRI proofs scale with
-/// `num_queries × num_layers × path_depth`; for the depth-15 large
-/// tier with 80 queries, real proofs land around ~150 KB. The cap
-/// here is generous; tighten before production once a prover lands.
+/// Hard cap on accepted proof size. Bench params produce ~10 KB
+/// proofs; production parameters (log_n≥20, ~80 queries) push
+/// proofs into the hundreds of KB. The cap below allows up to
+/// 256 KB — generous for bench, tighten before production.
 const MAX_PROOF_BYTES: u32 = 256 * 1024;
 
 #[cfg(test)]
@@ -86,14 +78,51 @@ fn tier_capacity(tier: u32) -> u32 {
 // Embedded baked VKs
 // ================================================================
 //
-// **Placeholders** until the PQ prover lands. Each VK is the byte
-// shape `fri_verifier::vk_format::parse_vk_bytes` expects — 64 bytes,
-// canonical-field-encoded — but the bytes themselves are a fixed
-// pattern that does not correspond to any real circuit. They exist
-// so the contract compiles and the per-tier dispatch is wired; once
-// the prover ships real VKs, replace these `include_bytes!` paths
-// with the `tests/fixtures/` entries (mirroring the PLONK flavor's
-// pattern).
+// Bench-scale verifying keys (log_n=6, num_layers=3, num_queries=8,
+// blowup=2). The Phase 2 follow-up swaps these for circuit-bound
+// VKs once the AIR + batched-PCS layer lands. Until then the
+// `pcs_pinned_root` field below is a placeholder pattern, NOT a
+// real preprocessed-trace commitment.
+
+/// VK byte width (defined by `fri_verifier::vk_format::VK_LEN`):
+/// 5 × u32 header + 4 × 32B BN254 Fr = 148 bytes.
+const VK_FILE_LEN: usize = VK_LEN;
+
+/// `omega_0` for our log_n=6 domain — primitive 64-th root of unity
+/// in BN254: `5^((r-1)/64) mod r`.
+const OMEGA_0_BE: [u8; 32] = [
+    0x14, 0x18, 0x14, 0x4d, 0x5b, 0x08, 0x0f, 0xca,
+    0xc2, 0x4c, 0xdb, 0x76, 0x49, 0xbd, 0xad, 0xf2,
+    0x46, 0xa6, 0xcb, 0x24, 0x26, 0xe3, 0x24, 0xbe,
+    0xdb, 0x94, 0xfb, 0x05, 0x11, 0x8f, 0x02, 0x3a,
+];
+/// `omega_0^{-1} mod r`.
+const OMEGA_0_INV_BE: [u8; 32] = [
+    0x26, 0x17, 0x7c, 0xf2, 0xb2, 0xa1, 0x3d, 0x3a,
+    0x03, 0x5c, 0xdc, 0x75, 0x67, 0xa8, 0xa6, 0x76,
+    0xd8, 0x03, 0x96, 0xec, 0x1d, 0x32, 0x13, 0xee,
+    0x78, 0xce, 0x6a, 0x0b, 0x76, 0x3d, 0x69, 0x8f,
+];
+/// `2^{-1} mod r = (r+1)/2`.
+const TWO_INV_BE: [u8; 32] = [
+    0x18, 0x32, 0x27, 0x39, 0x70, 0x98, 0xd0, 0x14,
+    0xdc, 0x28, 0x22, 0xdb, 0x40, 0xc0, 0xac, 0x2e,
+    0x94, 0x19, 0xf4, 0x24, 0x3c, 0xdc, 0xb8, 0x48,
+    0xa1, 0xf0, 0xfa, 0xc9, 0xf8, 0x00, 0x00, 0x01,
+];
+
+/// `pcs_pinned_root` placeholder — single BN254 Fr (= 32 bytes).
+/// Production VKs carry the prover-baked Merkle root of the AIR's
+/// preprocessed trace columns, distinct per circuit.
+const PCS_PINNED_ROOT_BE: [u8; 32] = [
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+    0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+];
+
+const MEMBERSHIP_VK_BYTES: [u8; VK_FILE_LEN] = build_vk_bytes(MEMBERSHIP_PI_COUNT);
+const UPDATE_VK_BYTES: [u8; VK_FILE_LEN] = build_vk_bytes(UPDATE_PI_COUNT);
 
 const VK_D5: &[u8] = &MEMBERSHIP_VK_BYTES;
 const VK_D8: &[u8] = &MEMBERSHIP_VK_BYTES;
@@ -103,43 +132,16 @@ const UPDATE_VK_D5: &[u8] = &UPDATE_VK_BYTES;
 const UPDATE_VK_D8: &[u8] = &UPDATE_VK_BYTES;
 const UPDATE_VK_D11: &[u8] = &UPDATE_VK_BYTES;
 
-/// Bench-scale verifying keys. NOT a real circuit. The placeholder
-/// numbers are chosen so a single FRI proof fits inside a Soroban
-/// tx envelope (full Plonky3 params at log_n=15, num_queries=80
-/// produce ~290 KB proofs that don't fit). When the PQ prover ships
-/// a real circuit, replace `include_bytes!` of the
-/// `fri-verifier/tests/fixtures/` files (mirroring the PLONK flavor).
-///
-/// Bench parameters:
-///   * `log_n      = 6`  → initial domain size 64
-///   * `num_layers = 3`  → final layer size 8 (after three folds)
-///   * `num_queries = 8` → eight independent FRI queries per proof
-///   * `blowup_log = 1`  → rate 1/2 (polynomial degree < 32)
-///   * Membership: 16 BabyBear PIs (= 2 × `BytesN<32>`).
-///   * Update:     24 BabyBear PIs (= 3 × `BytesN<32>`).
-///
-/// Field constants (BabyBear, p = 2^31 - 2^27 + 1):
-///   * `omega_0     = 0x669D6090` — primitive 64-th root of unity:
-///                                   `31^((p-1)/64) mod p`
-///   * `omega_0_inv = 0x27785FBF` — `omega_0^{-1} mod p`
-///   * `two_inv     = 0x3C000001` — `2^{-1} mod p = (p+1)/2`
-///
-/// `pcs_pinned_root` is the 8-lane Merkle root of the preprocessed
-/// trace. For the bench placeholder it's a fixed `{1,2,…,8}` pattern
-/// — real VKs will carry the prover-baked root of the AIR's constant
-/// columns, distinct per circuit.
-const MEMBERSHIP_VK_BYTES: [u8; VK_LEN] = build_vk_bytes(VERIFIER_PI_COUNT_MEMBERSHIP as u32);
-const UPDATE_VK_BYTES: [u8; VK_LEN] = build_vk_bytes(VERIFIER_PI_COUNT_UPDATE as u32);
-
-const fn build_vk_bytes(num_pi: u32) -> [u8; VK_LEN] {
-    let mut b = [0u8; VK_LEN];
+const fn build_vk_bytes(num_pi: u32) -> [u8; VK_FILE_LEN] {
+    let mut b = [0u8; VK_FILE_LEN];
     // log_n = 6 → initial domain size 64.
     b[0] = 6;
     // num_layers = 3 → final layer size 8.
     b[4] = 3;
     // num_queries = 8.
     b[8] = 8;
-    // num_pi: per-circuit BabyBear element count.
+    // num_pi: per-circuit BN254 Fr count (= number of `BytesN<32>`
+    // public inputs at the contract surface).
     let pi = num_pi.to_le_bytes();
     b[12] = pi[0];
     b[13] = pi[1];
@@ -147,28 +149,15 @@ const fn build_vk_bytes(num_pi: u32) -> [u8; VK_LEN] {
     b[15] = pi[3];
     // blowup_log = 1 (rate 1/2).
     b[16] = 1;
-    // pcs_pinned_root: 8 lanes, fixed `{1,2,…,8}` placeholder.
+    // pcs_pinned_root: 32 BE bytes at offset 20..52.
     let mut i = 0;
-    while i < 8 {
-        b[20 + i * 4] = (i as u8) + 1;
+    while i < 32 {
+        b[20 + i] = PCS_PINNED_ROOT_BE[i];
+        b[52 + i] = OMEGA_0_BE[i];
+        b[84 + i] = OMEGA_0_INV_BE[i];
+        b[116 + i] = TWO_INV_BE[i];
         i += 1;
     }
-    // omega_0 = 0x669D6090 (LE). Primitive 64-th root of unity in
-    // BabyBear, generated by `31^((p-1)/64) mod p`.
-    b[52] = 0x90;
-    b[53] = 0x60;
-    b[54] = 0x9D;
-    b[55] = 0x66;
-    // omega_0_inv = 0x27785FBF (LE).
-    b[56] = 0xBF;
-    b[57] = 0x5F;
-    b[58] = 0x78;
-    b[59] = 0x27;
-    // two_inv = 0x3C000001 (LE).
-    b[60] = 0x01;
-    b[61] = 0x00;
-    b[62] = 0x00;
-    b[63] = 0x3C;
     b
 }
 
@@ -258,14 +247,12 @@ pub struct RestrictedModeChanged {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitmentEntry {
-    /// Group commitment — 8 BabyBear elements LE-packed into 32 bytes.
+    /// Group commitment — single BN254 Fr (32 bytes BE).
     pub commitment: BytesN<32>,
     pub epoch: u64,
     pub timestamp: u64,
     pub tier: u32,
     pub active: bool,
-    /// Informational member count (not enforced; sentinel `0` =
-    /// "not tracked"). Same convention as the PLONK flavor.
     pub member_count: u32,
 }
 
@@ -337,7 +324,6 @@ impl PqSepAnarchyContract {
         Ok(())
     }
 
-    /// Create a new Anarchy group at epoch 0.
     pub fn create_group(
         env: Env,
         caller: Address,
@@ -370,7 +356,7 @@ impl PqSepAnarchyContract {
         if tier > 2 {
             return Err(Error::InvalidTier);
         }
-        if !is_canonical_pi(&commitment) {
+        if !is_canonical_pi(&env, &commitment) {
             return Err(Error::InvalidCommitmentEncoding);
         }
         if public_inputs.len() != MEMBERSHIP_PI_COUNT {
@@ -439,7 +425,6 @@ impl PqSepAnarchyContract {
         Ok(())
     }
 
-    /// Advance an Anarchy group to the next epoch.
     pub fn update_commitment(
         env: Env,
         group_id: BytesN<32>,
@@ -467,7 +452,7 @@ impl PqSepAnarchyContract {
         if epoch_old_be != be32_from_u64(&env, current.epoch) {
             return Err(Error::PublicInputsMismatch);
         }
-        if !is_canonical_pi(&c_new) {
+        if !is_canonical_pi(&env, &c_new) {
             return Err(Error::InvalidCommitmentEncoding);
         }
         if proof.len() > MAX_PROOF_BYTES {
@@ -573,8 +558,6 @@ impl PqSepAnarchyContract {
         Ok(result)
     }
 
-    // ---- Internal helpers ----
-
     fn require_initialized(env: &Env) -> Result<(), Error> {
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
@@ -667,92 +650,61 @@ impl PqSepAnarchyContract {
 // FRI verification glue
 // ================================================================
 
-/// Decode `proof: Bytes` to a heap-allocated `Vec<u8>`, decompose
-/// each `BytesN<32>` PI into its 8 BabyBear LE elements, hand off to
-/// the verifier crate.
+/// Decode `proof: Bytes` to a heap-allocated `Vec<u8>`, copy each
+/// `BytesN<32>` PI into a `[u8; 32]` slot, and hand off to the
+/// verifier crate.
 fn verify_fri_proof(
     env: &Env,
     vk_bytes: &[u8],
     proof: &Bytes,
     public_inputs: &Vec<BytesN<32>>,
 ) -> Result<(), Error> {
-    // Bytes → Vec<u8>. The `alloc` feature is enabled in this
-    // contract's Cargo.toml; `Bytes::iter` yields `u8`.
+    // Bytes → Vec<u8>.
     let mut proof_vec: AllocVec<u8> = AllocVec::with_capacity(proof.len() as usize);
     for b in proof.iter() {
         proof_vec.push(b);
     }
 
-    // Decompose `[BytesN<32>; n]` → `[[u8; 4]; 8 * n]`.
+    // Pack PIs into a fixed-size buffer (max = update circuit's 3 PIs).
     let pi_count = public_inputs.len() as usize;
-    let total = pi_count * BABYBEAR_ELEMENTS_PER_PI;
-    if total > MAX_VERIFIER_PI {
+    if pi_count > MAX_VERIFIER_PI {
         return Err(Error::PublicInputsMismatch);
     }
-    let mut pi_buf: [[u8; 4]; MAX_VERIFIER_PI] = [[0u8; 4]; MAX_VERIFIER_PI];
+    let mut pi_buf: [[u8; 32]; MAX_VERIFIER_PI] = [[0u8; 32]; MAX_VERIFIER_PI];
     for i in 0..pi_count {
-        let bn = public_inputs.get(i as u32).unwrap().to_array();
-        for j in 0..BABYBEAR_ELEMENTS_PER_PI {
-            let off = j * 4;
-            pi_buf[i * BABYBEAR_ELEMENTS_PER_PI + j]
-                .copy_from_slice(&bn[off..off + 4]);
-        }
+        pi_buf[i] = public_inputs.get(i as u32).unwrap().to_array();
     }
 
-    fri_verify(env, vk_bytes, &proof_vec, &pi_buf[..total])
+    fri_verify(env, vk_bytes, &proof_vec, &pi_buf[..pi_count])
         .map_err(|_| Error::InvalidProof)
 }
+
+const MAX_VERIFIER_PI: usize = UPDATE_PI_COUNT as usize;
 
 // ================================================================
 // Encoding helpers
 // ================================================================
 
 /// `u64` → 32-byte big-endian (high 24 zero, low 8 the value).
-/// Same shape as the PLONK flavor's helper. Note: the PQ verifier
-/// LE-decomposes this on the verifier side, so the on-chain BE
-/// presentation here is mostly for client-API parity with the PLONK
-/// flavor — clients can pass through the same bytes either way.
 fn be32_from_u64(env: &Env, value: u64) -> BytesN<32> {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&value.to_be_bytes());
     BytesN::from_array(env, &bytes)
 }
 
-/// Each BabyBear element in a PI must be a canonical `[0, P)` `u32`.
-/// Reject otherwise — `Fr::from_canonical_le_bytes` would do this on
-/// the verifier side, but rejecting at the contract surface gives a
-/// distinguishable error from a real `InvalidProof`.
-fn is_canonical_pi(value: &BytesN<32>) -> bool {
-    let bn = value.to_array();
-    for j in 0..BABYBEAR_ELEMENTS_PER_PI {
-        let off = j * 4;
-        let v = u32::from_le_bytes([
-            bn[off],
-            bn[off + 1],
-            bn[off + 2],
-            bn[off + 3],
-        ]);
-        if v >= fri_verifier::field::P {
-            return false;
-        }
-    }
-    true
+/// Each PI (commitment / epoch / etc.) must be a canonical BN254 Fr.
+/// Reject any byte sequence ≥ r at the contract surface so the
+/// verifier can assume canonical inputs throughout.
+fn is_canonical_pi(env: &Env, value: &BytesN<32>) -> bool {
+    field::is_canonical_be(env, &value.to_array())
 }
 
 // Cross-check at compile time that the verifier-crate constants
 // haven't drifted out from under the contract.
 const _: () = {
-    assert!(VK_LEN == 64, "fri_verifier::vk_format::VK_LEN drifted");
+    assert!(VK_LEN == 148, "fri_verifier::vk_format::VK_LEN drifted");
     assert!(
-        BABYBEAR_ELEMENTS_PER_PI == 8,
-        "BABYBEAR_ELEMENTS_PER_PI must be 8 (32-byte PI / 4-byte element)"
-    );
-    assert!(
-        MAX_VERIFIER_PI == VERIFIER_PI_COUNT_UPDATE,
-        "MAX_VERIFIER_PI must cover update circuit (3 PIs × 8 elements)"
-    );
-    assert!(
-        VERIFIER_PI_COUNT_MEMBERSHIP < VERIFIER_PI_COUNT_UPDATE,
+        MEMBERSHIP_PI_COUNT < UPDATE_PI_COUNT,
         "membership PI count must be smaller than update PI count"
     );
 };

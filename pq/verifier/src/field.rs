@@ -1,262 +1,160 @@
-//! BabyBear (p = 2^31 - 2^27 + 1 = 2 013 265 921) prime field, no_std.
+//! BN254 scalar field — the verifier's canonical field type.
 //!
-//! BabyBear is the canonical Plonky3 small-prime field for FRI-based
-//! PQ proof systems: 31-bit prime, single-`u32` storage, products fit
-//! in `u64` so reduction never crosses 128-bit ALU boundaries — which
-//! matters in WASM, where there is no native 64×64→128 multiply and
-//! `i64.mul` truncates. Goldilocks (2^64 − 2^32 + 1) would force
-//! manual schoolbook multiplication on every mul; BabyBear keeps mul
-//! within a single host instruction at the WASM level.
+//! ## Why BN254
 //!
-//! ## Form
+//! Production-ready PQ-shape FRI on Soroban is constrained by the
+//! host primitive surface: `env.crypto().poseidon2_permutation(...)`
+//! supports only `BLS12_381` and `BN254` fields. BabyBear (the
+//! Plonky3-canonical choice for FRI) has no host primitive — pure
+//! WASM Poseidon2 over BabyBear is computable but un-host-accelerated
+//! and would never approach production cost. BN254 gives us:
 //!
-//! Elements are stored in canonical (non-Montgomery) form as `u32`
-//! values in `[0, P)`. Multiplications produce a 62-bit `u64` product
-//! and reduce with native `% P` — WASM exposes `i64.rem_u` as a
-//! single instruction, and (P-1)^2 < 2^62 fits comfortably in `u64`.
-//! We deliberately avoid Montgomery form here so byte-level interop
-//! with the on-chain Poseidon2 host primitive (which consumes/returns
-//! canonical 4-byte BabyBear elements) needs no `to_montgomery` /
-//! `from_montgomery` plumbing on every host crossing.
+//! - host-accelerated `fr_add` / `fr_sub` / `fr_mul` / `fr_pow` /
+//!   `fr_inv` (one host call per op vs. tens of WASM instructions),
+//! - host-accelerated Poseidon2 with vendored Horizen Labs constants
+//!   (one host call per permutation vs. hundreds of WASM instructions),
+//! - a 254-bit field, so soundness is ~127 bits without an extension
+//!   tower (compare to BabyBear, which needs `BabyBear^4` for the
+//!   same security floor).
 //!
-//! ## Byte encoding
+//! The trade-off is element width: each `Fr` is 32 bytes vs. 4 bytes
+//! for BabyBear. Proofs are ~8x larger byte-for-byte, but the host
+//! primitives are roughly the same per-op latency regardless of
+//! field size, so total verifier time is dominated by the host-call
+//! count rather than the per-element work.
 //!
-//! Field elements are serialised little-endian in 4 bytes (`u32`
-//! LE bytes) — matches Plonky3 prover-side `BabyBear::as_canonical_u32`
-//! followed by `to_le_bytes`. A 32-byte `BytesN<32>` carrying 8
-//! BabyBear elements (used as commitments / public-input hashes by
-//! the contract layer) packs them in index-ascending order:
-//! `[el0_LE | el1_LE | ... | el7_LE]`.
+//! ## Encoding
+//!
+//! All `Fr` byte serialisation is **big-endian** to match
+//! `Fr::from_bytes` / `Fr::to_bytes` in the soroban SDK and the
+//! host's BN254 surface. Public-input slices in the contract layer
+//! are `BytesN<32>` BE — same convention as the PLONK flavor's
+//! existing PI shape, so client code that already targets the PLONK
+//! contracts can target the FRI flavor without re-encoding.
 
-use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+pub use soroban_sdk::crypto::bn254::Fr;
+use soroban_sdk::{Bytes, BytesN, Env, U256};
 
-/// BabyBear modulus.
-pub const P: u32 = 0x78000001;
-
-/// One element of `F_p`. Always in `[0, P)`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Default, Hash)]
-pub struct Fr(pub u32);
-
-impl Fr {
-    pub const ZERO: Fr = Fr(0);
-    pub const ONE: Fr = Fr(1);
-
-    #[inline(always)]
-    pub fn new(v: u32) -> Self {
-        // Reduce on the way in. Cheap relative to a single mul.
-        Fr(v % P)
-    }
-
-    /// Decode from canonical 4-byte little-endian. Returns `None` if
-    /// `value >= P` (not canonical).
-    #[inline]
-    pub fn from_canonical_le_bytes(bytes: &[u8; 4]) -> Option<Self> {
-        let v = u32::from_le_bytes(*bytes);
-        if v >= P {
-            None
-        } else {
-            Some(Fr(v))
-        }
-    }
-
-    /// Encode to canonical 4-byte little-endian.
-    #[inline]
-    pub fn to_le_bytes(self) -> [u8; 4] {
-        self.0.to_le_bytes()
-    }
-
-    #[inline]
-    pub fn as_u32(self) -> u32 {
-        self.0
-    }
-
-    /// `self^exp` by square-and-multiply.
-    pub fn pow(mut self, mut exp: u64) -> Self {
-        let mut acc = Fr::ONE;
-        while exp > 0 {
-            if exp & 1 == 1 {
-                acc = acc * self;
-            }
-            self = self * self;
-            exp >>= 1;
-        }
-        acc
-    }
-
-    /// Multiplicative inverse via Fermat's little theorem.
-    /// Panics on zero (callers must guard).
-    pub fn inverse(self) -> Self {
-        debug_assert!(self.0 != 0, "Fr::inverse called on zero");
-        // p - 2 = 2_013_265_919
-        self.pow((P - 2) as u64)
-    }
-}
-
-#[inline(always)]
-fn add_mod(a: u32, b: u32) -> u32 {
-    let s = a.wrapping_add(b);
-    // s ∈ [0, 2P). Subtract P if s ≥ P.
-    let s2 = s.wrapping_sub(P);
-    if (s2 as i32) >= 0 {
-        s2
-    } else {
-        s
-    }
-}
-
-#[inline(always)]
-fn sub_mod(a: u32, b: u32) -> u32 {
-    let (d, borrow) = a.overflowing_sub(b);
-    if borrow {
-        d.wrapping_add(P)
-    } else {
-        d
-    }
-}
-
-#[inline(always)]
-fn neg_mod(a: u32) -> u32 {
-    if a == 0 {
-        0
-    } else {
-        P - a
-    }
-}
-
-/// Reduce a 62-bit product into `[0, P)`.
+/// Construct the canonical zero element.
 ///
-/// `(P-1)^2 = (2^31 - 2^27)^2 < 2^62`, so the full product fits in
-/// `u64`. WASM exposes `i64.rem_u` natively (one instruction), so a
-/// straight `%` is the cheapest path with no constants to keep in sync.
-#[inline(always)]
-fn mul_reduce(a: u32, b: u32) -> u32 {
-    let t: u64 = (a as u64) * (b as u64);
-    (t % (P as u64)) as u32
+/// `Fr::from(U256::from_u32(env, 0))` — host call to construct U256,
+/// then host call to reduce mod r. Cheap but not free; cache when
+/// reused across many ops.
+#[inline]
+pub fn zero(env: &Env) -> Fr {
+    Fr::from(U256::from_u32(env, 0))
 }
 
-impl Add for Fr {
-    type Output = Fr;
-    #[inline]
-    fn add(self, rhs: Fr) -> Fr {
-        Fr(add_mod(self.0, rhs.0))
-    }
+/// Construct the canonical one element.
+#[inline]
+pub fn one(env: &Env) -> Fr {
+    Fr::from(U256::from_u32(env, 1))
 }
 
-impl AddAssign for Fr {
-    #[inline]
-    fn add_assign(&mut self, rhs: Fr) {
-        self.0 = add_mod(self.0, rhs.0);
-    }
+/// Construct an `Fr` from a small `u32`. Useful for round indices,
+/// shape constants, etc.
+#[inline]
+pub fn from_u32(env: &Env, v: u32) -> Fr {
+    Fr::from(U256::from_u32(env, v))
 }
 
-impl Sub for Fr {
-    type Output = Fr;
-    #[inline]
-    fn sub(self, rhs: Fr) -> Fr {
-        Fr(sub_mod(self.0, rhs.0))
-    }
+/// Decode 32 BE bytes into an `Fr`. Inputs `>= r` are silently
+/// reduced modulo r by `From<U256>`. The contract layer should
+/// reject non-canonical PIs before calling here so callers never
+/// observe the reduction case (otherwise two distinct on-the-wire
+/// values would collide to the same field element).
+#[inline]
+pub fn from_be_bytes(env: &Env, bytes: &[u8; 32]) -> Fr {
+    Fr::from_bytes(BytesN::from_array(env, bytes))
 }
 
-impl SubAssign for Fr {
-    #[inline]
-    fn sub_assign(&mut self, rhs: Fr) {
-        self.0 = sub_mod(self.0, rhs.0);
-    }
+/// Encode an `Fr` to 32 BE bytes.
+#[inline]
+pub fn to_be_bytes(fr: &Fr) -> [u8; 32] {
+    fr.to_bytes().to_array()
 }
 
-impl Neg for Fr {
-    type Output = Fr;
-    #[inline]
-    fn neg(self) -> Fr {
-        Fr(neg_mod(self.0))
-    }
+/// Test whether the BE-encoded value `bytes` is canonical (`< r`).
+/// The contract surface uses this to reject non-canonical PIs at
+/// the boundary so the verifier can assume in-range elements.
+pub fn is_canonical_be(env: &Env, bytes: &[u8; 32]) -> bool {
+    let v = U256::from_be_bytes(env, &Bytes::from_array(env, bytes));
+    v < BN254_FR_MODULUS_U256(env)
 }
 
-impl Mul for Fr {
-    type Output = Fr;
-    #[inline]
-    fn mul(self, rhs: Fr) -> Fr {
-        Fr(mul_reduce(self.0, rhs.0))
-    }
-}
+/// BN254 scalar field modulus r in big-endian bytes.
+/// `r = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001`.
+pub const BN254_FR_MODULUS_BE: [u8; 32] = [
+    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29,
+    0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
+    0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91,
+    0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
+];
 
-impl MulAssign for Fr {
-    #[inline]
-    fn mul_assign(&mut self, rhs: Fr) {
-        self.0 = mul_reduce(self.0, rhs.0);
-    }
+#[allow(non_snake_case)]
+#[inline]
+fn BN254_FR_MODULUS_U256(env: &Env) -> U256 {
+    U256::from_be_bytes(env, &Bytes::from_array(env, &BN254_FR_MODULUS_BE))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::Env;
 
     #[test]
-    fn add_sub_roundtrip() {
-        let a = Fr::new(0x12345678);
-        let b = Fr::new(0x71000000);
-        let c = a + b;
-        assert_eq!(c - b, a);
-        assert_eq!(c - a, b);
+    fn zero_one_distinct() {
+        let env = Env::default();
+        assert_ne!(zero(&env), one(&env));
     }
 
     #[test]
-    fn mul_zero() {
-        let a = Fr::new(12345);
-        assert_eq!(a * Fr::ZERO, Fr::ZERO);
-        assert_eq!(Fr::ZERO * a, Fr::ZERO);
+    fn zero_plus_one_is_one() {
+        let env = Env::default();
+        assert_eq!(zero(&env) + one(&env), one(&env));
     }
 
     #[test]
-    fn mul_one() {
-        let a = Fr::new(0x12345);
-        assert_eq!(a * Fr::ONE, a);
+    fn one_times_one_is_one() {
+        let env = Env::default();
+        assert_eq!(one(&env) * one(&env), one(&env));
     }
 
     #[test]
-    fn neg_addition() {
-        let a = Fr::new(123456789);
-        assert_eq!(a + (-a), Fr::ZERO);
+    fn round_trip_be_bytes() {
+        let env = Env::default();
+        let mut bytes = [0u8; 32];
+        bytes[31] = 0x42;
+        bytes[30] = 0x13;
+        let fr = from_be_bytes(&env, &bytes);
+        assert_eq!(to_be_bytes(&fr), bytes);
     }
 
     #[test]
-    fn inverse_roundtrip() {
-        let a = Fr::new(0x1234567);
-        let inv = a.inverse();
-        assert_eq!(a * inv, Fr::ONE);
+    fn modulus_minus_one_is_canonical() {
+        let env = Env::default();
+        let mut bytes = BN254_FR_MODULUS_BE;
+        bytes[31] = 0x00; // r - 1 still has the same high bits.
+        assert!(is_canonical_be(&env, &bytes));
     }
 
     #[test]
-    fn pow_matches_repeated_mul() {
-        let a = Fr::new(7);
-        // 7^5 = 16807, well under P
-        assert_eq!(a.pow(5), Fr::new(16807));
+    fn modulus_itself_is_not_canonical() {
+        let env = Env::default();
+        assert!(!is_canonical_be(&env, &BN254_FR_MODULUS_BE));
     }
 
     #[test]
-    fn from_canonical_le_bytes_rejects_oversized() {
-        // P = 0x78000001 — encode P itself, must reject.
-        let bytes = P.to_le_bytes();
-        assert!(Fr::from_canonical_le_bytes(&bytes).is_none());
-        // P-1 must accept.
-        let bytes = (P - 1).to_le_bytes();
-        assert_eq!(
-            Fr::from_canonical_le_bytes(&bytes),
-            Some(Fr(P - 1))
-        );
+    fn pow_zero_is_one() {
+        let env = Env::default();
+        let v = from_u32(&env, 12345);
+        assert_eq!(v.pow(0), one(&env));
     }
 
     #[test]
-    fn to_from_le_bytes_roundtrip() {
-        let a = Fr::new(0x77ffff00);
-        let bytes = a.to_le_bytes();
-        assert_eq!(Fr::from_canonical_le_bytes(&bytes), Some(a));
-    }
-
-    /// Pin `P` against the spec: BabyBear is 2^31 - 2^27 + 1.
-    #[test]
-    fn p_constant() {
-        assert_eq!(P, (1u32 << 31) - (1u32 << 27) + 1);
-        assert_eq!(P, 2_013_265_921);
+    fn inverse_round_trip() {
+        let env = Env::default();
+        let v = from_u32(&env, 7);
+        assert_eq!(v.clone() * v.inv(), one(&env));
     }
 }

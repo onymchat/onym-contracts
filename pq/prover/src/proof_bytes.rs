@@ -1,33 +1,31 @@
 //! Serialise a `ProofWitness` into bytes that round-trip through
 //! `fri_verifier::proof_format::parse_proof_bytes`.
 //!
-//! Layout (must match the parser exactly):
+//! Layout (must match the parser exactly — header u32s little-
+//! endian, field elements 32-byte BN254 BE, digests = single Fr):
 //!
 //! ```text
 //!   [num_layers_plus_1: u32_le]
-//!   [layer_root[i]: Digest]   * (num_layers_plus_1)
+//!   [layer_root[i]: 32 B BE]   * (num_layers_plus_1)
 //!   [final_poly_len: u32_le]
-//!   [final_poly[k]: Fr]       * (final_poly_len)
+//!   [final_poly[k]: 32 B BE]   * (final_poly_len)
 //!   [num_queries: u32_le]
 //!   for q in 0..num_queries:
 //!       for i in 0..num_layers_plus_1:
-//!           [pos_value: Fr]
-//!           [neg_value: Fr]
+//!           [pos_value: 32 B BE]
+//!           [neg_value: 32 B BE]
 //!       for i in 0..num_layers_plus_1:
-//!           [pos_path_len: u32_le]
-//!           [pos_path[k]: Digest] * pos_path_len
-//!           [neg_path[k]: Digest] * pos_path_len  (same length as pos)
+//!           [path_len: u32_le]
+//!           [pos_path[k]: 32 B BE] * path_len
+//!           [neg_path[k]: 32 B BE] * path_len
 //! ```
-//!
-//! The parser's per-path-pair format is "one path_len header followed
-//! by `path_len` pos digests then `path_len` neg digests" — pos and
-//! neg share the length field. The prover guarantees the two paths
-//! have the same length (they live in the same Merkle tree at the
-//! same layer).
 
 use crate::fri_prover::ProofWitness;
-use fri_verifier::field::Fr;
+use fri_verifier::field::{self, Fr};
 use fri_verifier::merkle::Digest;
+
+extern crate alloc;
+use alloc::vec::Vec;
 
 pub fn serialize_proof(witness: &ProofWitness) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(16 * 1024);
@@ -42,18 +40,16 @@ pub fn serialize_proof(witness: &ProofWitness) -> Vec<u8> {
     // final_poly
     out.extend_from_slice(&(witness.final_poly.len() as u32).to_le_bytes());
     for c in witness.final_poly.iter() {
-        write_fr(&mut out, *c);
+        write_fr(&mut out, c);
     }
 
     // num_queries
     out.extend_from_slice(&(witness.query_openings.len() as u32).to_le_bytes());
     for query in witness.query_openings.iter() {
-        // (pos, neg) values, layer 0 .. num_layers_plus_1-1
         for opening in query.iter() {
-            write_fr(&mut out, opening.pos_value);
-            write_fr(&mut out, opening.neg_value);
+            write_fr(&mut out, &opening.pos_value);
+            write_fr(&mut out, &opening.neg_value);
         }
-        // (pos_path, neg_path) for each layer.
         for opening in query.iter() {
             assert_eq!(
                 opening.pos_path.len(),
@@ -73,14 +69,12 @@ pub fn serialize_proof(witness: &ProofWitness) -> Vec<u8> {
     out
 }
 
-fn write_fr(out: &mut Vec<u8>, x: Fr) {
-    out.extend_from_slice(&x.to_le_bytes());
+fn write_fr(out: &mut Vec<u8>, x: &Fr) {
+    out.extend_from_slice(&field::to_be_bytes(x));
 }
 
 fn write_digest(out: &mut Vec<u8>, d: &Digest) {
-    for lane in d.iter() {
-        write_fr(out, *lane);
-    }
+    write_fr(out, d);
 }
 
 #[cfg(test)]
@@ -93,10 +87,11 @@ mod tests {
     #[test]
     fn serialised_proof_parses() {
         let env = Env::default();
-        let pi: [[u8; 4]; 16] = [[0u8; 4]; 16];
+        env.cost_estimate().budget().reset_unlimited();
+        let pi: [[u8; 32]; 2] = [[0u8; 32]; 2];
         let witness = prove(&env, &pi);
         let bytes = serialize_proof(&witness);
-        let parsed = parse_proof_bytes(&bytes).expect("parser should accept");
+        let parsed = parse_proof_bytes(&env, &bytes).expect("parser should accept");
         assert_eq!(parsed.layer_roots.len(), witness.layer_roots.len());
         assert_eq!(parsed.final_poly.len(), witness.final_poly.len());
         assert_eq!(parsed.query_values.len(), witness.query_openings.len());

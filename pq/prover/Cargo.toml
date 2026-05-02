@@ -2,7 +2,7 @@
 name = "pq-fri-prover"
 version = "0.1.0"
 edition = "2021"
-description = "Off-chain FRI prover for the pq-sep-* contract suite. Bench-scoped: produces self-consistent FRI proofs that the on-chain verifier accepts. Does NOT yet prove anything about an underlying circuit — the batched-PCS layer that ties FRI to an AIR is a follow-up. Use only for gas-cost measurement, not as a security gadget."
+description = "Off-chain FRI prover for the pq-sep-* contract suite (BN254 + Horizen Labs Poseidon2 t=3). Reuses fri-verifier's primitives so prover and on-chain verifier are byte-equivalent. Bench-scoped: produces self-consistent FRI proofs the verifier accepts. Does NOT yet prove anything about an underlying circuit — the batched-PCS layer that ties FRI to an AIR is a follow-up."
 license = "MIT"
 publish = false
 
@@ -10,16 +10,21 @@ publish = false
 crate-type = ["rlib"]
 doctest = false
 
-# The prover reuses the verifier's no_std primitives — field
-# arithmetic, Poseidon2 software fallback, sponge transcript, and
-# Merkle-path verifier — so the bytes the prover emits are
-# byte-equivalent to what the verifier hashes/verifies. The off-chain
-# `host_poseidon2::permute` falls through to the same software
-# Poseidon2 the on-chain wasm path uses (until the host primitive's
-# SDK surface lands), keeping prover/verifier symmetric.
+# The prover reuses the verifier's no_std primitives — BN254 field
+# arithmetic, Poseidon2-t3 host wrapper, sponge transcript, and
+# Merkle-path verifier — so the bytes the prover emits are byte-
+# equivalent to what the verifier hashes/verifies. Both sides hit
+# the same `env.crypto_hazmat().poseidon2_permutation` host primitive
+# with the same vendored Horizen Labs constants, so the off-chain
+# prover and the on-chain verifier are guaranteed identical.
 [dependencies]
 fri-verifier = { path = "../verifier" }
-soroban-sdk = "=26.0.0-rc.1"
+# `testutils` is required because the prover bin runs in a normal
+# (non-contract) host process: `Env::default()` without testutils
+# returns an env that traps on every host call. Pulling testutils
+# in unconditionally is fine for an off-chain bench tool — it never
+# ships in a Soroban WASM build.
+soroban-sdk = { version = "=26.0.0-rc.1", features = ["hazmat-crypto", "testutils"] }
 clap = { version = "4", features = ["derive"] }
 
 [profile.release]
