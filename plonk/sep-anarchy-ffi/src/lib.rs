@@ -474,9 +474,11 @@ pub unsafe extern "C" fn onym_anarchy_prove_membership(
 /// Inputs:
 ///   * `member_leaf_hashes_old` — old-tree leaf hashes (32 BE Fr each,
 ///     ≤ 2^depth).
-///   * `member_leaf_hashes_new` — new-tree leaf hashes. Pass {NULL, 0}
-///     to reuse the old-tree leaves (no roster change). The circuit
-///     doesn't constrain new-tree membership (see
+///   * `member_leaf_hashes_new` — new-tree leaf hashes. Pass exactly
+///     `{NULL, 0}` to reuse the old-tree leaves (no roster change);
+///     mixed states (NULL+nonzero, valid+zero) are rejected so that a
+///     caller-side input bug can't silently fall back to "no change".
+///     The circuit doesn't constrain new-tree membership (see
 ///     `circuit::plonk::update`'s "new-tree binding is commitment-only"
 ///     note); only the new root binds.
 ///   * `prover_secret_key` — prover's own secret key (32 BE Fr).
@@ -522,17 +524,38 @@ pub unsafe extern "C" fn onym_anarchy_prove_update(
             "member_leaf_hashes_old",
         )?;
         let leaves_old = parse_leaf_hashes(leaves_old_packed, "member_leaf_hashes_old")?;
-        let leaves_new: Vec<Fr> = if member_leaf_hashes_new_len == 0
-            || member_leaf_hashes_new_ptr.is_null()
-        {
-            leaves_old.clone()
-        } else {
-            let leaves_new_packed = read_bytes(
-                member_leaf_hashes_new_ptr,
-                member_leaf_hashes_new_len,
-                "member_leaf_hashes_new",
-            )?;
-            parse_leaf_hashes(leaves_new_packed, "member_leaf_hashes_new")?
+        // The "reuse old roster" sentinel is the exact pair {NULL, 0}.
+        // Reject mixed states (NULL+nonzero, valid+zero) explicitly —
+        // a caller bug like `len = 0` while ptr points to a valid
+        // buffer (or vice-versa) shouldn't silently fall back to the
+        // old roster, since that's a different proof from what the
+        // caller intended.
+        let new_is_null = member_leaf_hashes_new_ptr.is_null();
+        let new_is_empty = member_leaf_hashes_new_len == 0;
+        let leaves_new: Vec<Fr> = match (new_is_null, new_is_empty) {
+            (true, true) => leaves_old.clone(),
+            (true, false) => {
+                return Err(format!(
+                    "member_leaf_hashes_new pointer is NULL but length is {} \
+                     — pass {{NULL, 0}} to reuse the old roster, or supply both",
+                    member_leaf_hashes_new_len
+                ));
+            }
+            (false, true) => {
+                return Err(
+                    "member_leaf_hashes_new length is 0 but pointer is non-NULL \
+                     — pass {NULL, 0} to reuse the old roster, or supply both"
+                        .to_string(),
+                );
+            }
+            (false, false) => {
+                let leaves_new_packed = read_bytes(
+                    member_leaf_hashes_new_ptr,
+                    member_leaf_hashes_new_len,
+                    "member_leaf_hashes_new",
+                )?;
+                parse_leaf_hashes(leaves_new_packed, "member_leaf_hashes_new")?
+            }
         };
 
         let num_leaves = 1usize << depth;

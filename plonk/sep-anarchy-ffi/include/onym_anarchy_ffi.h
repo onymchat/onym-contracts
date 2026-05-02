@@ -98,11 +98,15 @@ bool onym_anarchy_prove_membership(size_t depth,
 //
 // Inputs:
 //   member_leaf_hashes_old   — old-tree leaf hashes (32 BE Fr each).
-//   member_leaf_hashes_new   — new-tree leaf hashes. Pass {NULL, 0}
-//                              to reuse the old roster (no roster
-//                              change). Circuit doesn't constrain
-//                              new-tree membership; only the new root
-//                              binds.
+//   member_leaf_hashes_new   — new-tree leaf hashes. Pass EXACTLY
+//                              {NULL, 0} to reuse the old roster (no
+//                              roster change). Mixed states
+//                              (NULL+nonzero, valid+zero) are
+//                              rejected with a clear error so a
+//                              caller-side input bug can't silently
+//                              fall back to "no change". Circuit
+//                              doesn't constrain new-tree membership;
+//                              only the new root binds.
 //   prover_secret_key        — prover's own secret key (32 BE Fr).
 //   prover_index_old         — prover's slot in the old roster.
 //   epoch_old                — old-commitment epoch (only epoch PI;

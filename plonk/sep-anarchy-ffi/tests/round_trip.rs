@@ -273,6 +273,75 @@ fn prove_membership_rejects_out_of_range_prover_index() {
 }
 
 #[test]
+fn prove_update_rejects_mixed_optional_roster_states() {
+    // Audit Finding (round 3): the {NULL, 0} sentinel for "reuse old
+    // roster" must be exact. A caller bug like ptr = NULL with len > 0,
+    // or ptr = valid with len = 0, must error rather than silently
+    // falling back to the old roster (which would prove an update the
+    // caller didn't intend).
+    let secret_keys: Vec<Fr> = (1u64..=8).map(Fr::from).collect();
+    let leaves_packed = pack_leaf_hashes_from_secret_keys(&secret_keys);
+    let prover_sk_be = fr_be(&secret_keys[0]);
+    let salt = [0u8; 32];
+
+    // Case 1: ptr = NULL, len > 0 — must reject.
+    let mut proof_buf = OnymByteBuffer { ptr: ptr::null_mut(), len: 0 };
+    let mut pi_buf = OnymByteBuffer { ptr: ptr::null_mut(), len: 0 };
+    let mut err: *mut std::os::raw::c_char = ptr::null_mut();
+    let ok = unsafe {
+        onym_anarchy_prove_update(
+            5,
+            leaves_packed.as_ptr(),
+            leaves_packed.len(),
+            ptr::null(), // NULL ptr
+            32,          // but nonzero len
+            prover_sk_be.as_ptr(),
+            prover_sk_be.len(),
+            0,
+            0,
+            salt.as_ptr(),
+            salt.len(),
+            salt.as_ptr(),
+            salt.len(),
+            &mut proof_buf,
+            &mut pi_buf,
+            &mut err,
+        )
+    };
+    assert!(!ok, "(NULL, len>0) must be rejected");
+    assert!(!err.is_null());
+    let _ = unsafe { std::ffi::CString::from_raw(err) };
+
+    // Case 2: ptr = valid, len = 0 — must reject.
+    let mut proof_buf = OnymByteBuffer { ptr: ptr::null_mut(), len: 0 };
+    let mut pi_buf = OnymByteBuffer { ptr: ptr::null_mut(), len: 0 };
+    let mut err: *mut std::os::raw::c_char = ptr::null_mut();
+    let ok = unsafe {
+        onym_anarchy_prove_update(
+            5,
+            leaves_packed.as_ptr(),
+            leaves_packed.len(),
+            leaves_packed.as_ptr(), // valid ptr
+            0,                      // but zero len
+            prover_sk_be.as_ptr(),
+            prover_sk_be.len(),
+            0,
+            0,
+            salt.as_ptr(),
+            salt.len(),
+            salt.as_ptr(),
+            salt.len(),
+            &mut proof_buf,
+            &mut pi_buf,
+            &mut err,
+        )
+    };
+    assert!(!ok, "(valid_ptr, len=0) must be rejected");
+    assert!(!err.is_null());
+    let _ = unsafe { std::ffi::CString::from_raw(err) };
+}
+
+#[test]
 fn prove_membership_rejects_unsupported_tier() {
     // Audit Finding 1 regression: prove_* must restrict depth to the
     // three tiers an on-chain VK exists for (5/8/11). Otherwise an
