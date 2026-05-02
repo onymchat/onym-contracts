@@ -85,12 +85,15 @@ jobs:
 
       - name: Verify exported FFI symbols
         working-directory: plonk/${{ matrix.crate }}
-        # Each crate must export only its own onym_* symbols (no leakage
-        # from prover/jellyfish/k256 deps). sep-common-ffi exports
-        # generic onym_* (compute/nostr/byte_buffer/string); per-type
-        # crates export onym_<type>_*. A regression in lib.rs that
-        # accidentally re-exported a dep's #[no_mangle] symbol would
-        # surface here as a foreign symbol in the staticlib.
+        # Each crate must export only the onym_* prefix it OWNS (no
+        # leakage from prover / jellyfish / k256 deps, and no
+        # accidental cross-crate prefix sharing). sep-common-ffi owns
+        # the generic onym_{byte_buffer,string,compute,parse_plonk,
+        # nostr}_* surface; per-type crates own onym_<type>_*.
+        # A regression in lib.rs that accidentally re-exported a dep's
+        # #[no_mangle] symbol — or that defined an onym_ symbol
+        # outside its crate's prefix — surfaces here as a hard CI
+        # failure.
         run: |
           set -euo pipefail
           ARTIFACT="target/release/deps/libonym_${{ matrix.crate }}.a"
@@ -100,27 +103,55 @@ jobs:
             ls -la target/release/deps/ | head -20
             exit 1
           fi
-          # Use nm with linux-style options (no -gU on linux); GNU nm
-          # prints external defined symbols by default.
-          SYMS=$(nm --defined-only --extern-only "$ARTIFACT" | awk '{print $3}' | grep -E '^onym_' || true)
-          if [ -z "$SYMS" ]; then
-            echo "no onym_ symbols exported by $ARTIFACT"
+
+          # Per-crate allowlist for the onym_ prefix space the crate is
+          # entitled to define. ANY onym_ symbol outside this regex is
+          # treated as a leak (cross-crate prefix collision or
+          # accidental cdylib re-export).
+          case "${{ matrix.crate }}" in
+            sep-common-ffi)
+              # Common surface: byte buffer / string memory mgmt,
+              # hashing primitives, plonk proof parser, nostr.
+              ALLOWED_ONYM='^onym_(byte_buffer_free$|string_free$|compute_(leaf_hash|public_key|merkle_root|sha256_commitment|poseidon_commitment)$|parse_plonk_proof$|nostr_(derive_public_key|sign_event_id|verify_event_signature)$)'
+              ;;
+            sep-anarchy-ffi)  ALLOWED_ONYM='^onym_anarchy_'  ;;
+            sep-oneonone-ffi) ALLOWED_ONYM='^onym_oneonone_' ;;
+            sep-tyranny-ffi)  ALLOWED_ONYM='^onym_tyranny_'  ;;
+            *) echo "unknown matrix crate ${{ matrix.crate }}"; exit 1 ;;
+          esac
+
+          # GNU nm's `--defined-only --extern-only` is the Linux
+          # equivalent of macOS `nm -gU`.
+          ALL_DEFINED=$(nm --defined-only --extern-only "$ARTIFACT" | awk '{print $3}')
+          ONYM_SYMS=$(echo "$ALL_DEFINED" | grep -E '^onym_' || true)
+          if [ -z "$ONYM_SYMS" ]; then
+            echo "FAIL: no onym_ symbols exported by $ARTIFACT"
             exit 1
           fi
-          echo "Exported onym_ symbols ($(echo "$SYMS" | wc -l)):"
-          echo "$SYMS" | sort
-          # Any non-onym defined extern symbol from our crate would be
-          # a leak. The Rust runtime adds some platform symbols
-          # (rust_eh_personality, rust_panic etc.); we whitelist by
-          # checking nothing OTHER than onym_/rust_/__/_ZN/_RNv/
-          # platform-internal patterns leaks.
-          STRAY=$(nm --defined-only --extern-only "$ARTIFACT" | awk '{print $3}' \
+          echo "Exported onym_ symbols ($(echo "$ONYM_SYMS" | wc -l)):"
+          echo "$ONYM_SYMS" | sort
+
+          # FAIL: onym_ symbols outside this crate's allowed prefix.
+          BAD_ONYM=$(echo "$ONYM_SYMS" | grep -vE "$ALLOWED_ONYM" || true)
+          if [ -n "$BAD_ONYM" ]; then
+            echo "FAIL: ${{ matrix.crate }} exports onym_ symbols outside its allowed prefix:"
+            echo "$BAD_ONYM"
+            echo "Allowed regex: $ALLOWED_ONYM"
+            exit 1
+          fi
+
+          # FAIL: non-onym, non-rust-runtime symbols (FFI leak from a
+          # transitive dep that exported #[no_mangle] symbols). The
+          # allowlist covers Rust's mangled names (_ZN / _RNv / _RIN*),
+          # eh-personality (rust_*), platform compiler-builtins (__*),
+          # debug sections (DW.*, .L*, .*), and standard libc memory
+          # builtins that Rust's linker may emit.
+          STRAY=$(echo "$ALL_DEFINED" \
                   | grep -vE '^(onym_|rust_|__|_ZN|_RNv|_RINv|_RNC|_RNCs|_RNCsv|_RINvCs|DW\.|\.L|\.|$)' \
                   | grep -vE '^(memcpy|memmove|memset|memcmp|bcmp|strlen)$' || true)
           if [ -n "$STRAY" ]; then
-            echo "WARNING: non-onym/non-rust symbols exported (potential FFI leak):"
+            echo "FAIL: ${{ matrix.crate }} exports non-onym, non-rust-runtime symbols (likely FFI leak from a dep):"
             echo "$STRAY"
-            # Don't hard-fail — Rust's mangling scheme + linker may emit
-            # transient symbols we don't anticipate. Surface in CI logs
-            # so a human can audit before shipping.
+            exit 1
           fi
+          echo "OK: ${{ matrix.crate }} symbol surface is clean."
