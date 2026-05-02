@@ -273,6 +273,46 @@ fn prove_membership_rejects_out_of_range_prover_index() {
 }
 
 #[test]
+fn prove_membership_rejects_unsupported_tier() {
+    // Audit Finding 1 regression: prove_* must restrict depth to the
+    // three tiers an on-chain VK exists for (5/8/11). Otherwise an
+    // SDK can get a self-verified proof for e.g. depth=7 that no
+    // contract will accept.
+    let secret_keys: Vec<Fr> = (1u64..=4).map(Fr::from).collect();
+    let leaves_packed = pack_leaf_hashes_from_secret_keys(&secret_keys);
+    let prover_sk_be = fr_be(&secret_keys[0]);
+    let salt = [0u8; 32];
+
+    for bad_depth in [0usize, 1, 4, 6, 7, 9, 10, 12, 16, 31] {
+        let mut proof_buf = OnymByteBuffer { ptr: ptr::null_mut(), len: 0 };
+        let mut commit_buf = OnymByteBuffer { ptr: ptr::null_mut(), len: 0 };
+        let mut err: *mut std::os::raw::c_char = ptr::null_mut();
+        let ok = unsafe {
+            onym_anarchy_prove_membership(
+                bad_depth,
+                leaves_packed.as_ptr(),
+                leaves_packed.len(),
+                prover_sk_be.as_ptr(),
+                prover_sk_be.len(),
+                0,
+                0,
+                salt.as_ptr(),
+                salt.len(),
+                &mut proof_buf,
+                &mut commit_buf,
+                &mut err,
+            )
+        };
+        assert!(
+            !ok,
+            "depth={bad_depth} should be rejected — only 5/8/11 have on-chain VKs"
+        );
+        assert!(!err.is_null(), "depth={bad_depth} should populate out_error");
+        let _ = unsafe { std::ffi::CString::from_raw(err) };
+    }
+}
+
+#[test]
 fn prove_membership_null_second_output_does_not_publish_first() {
     // Audit Finding 3 regression test: when one of the two output
     // pointers is null, the function must fail BEFORE writing to

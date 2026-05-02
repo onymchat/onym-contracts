@@ -158,15 +158,19 @@ fn fr_to_be_bytes(fr: &Fr) -> Vec<u8> {
 }
 
 fn check_depth(depth: usize) -> Result<(), String> {
-    // 32 is the prover-crate's hard ceiling. Real consumers stick to
-    // 5/8/11; bigger trees are rejected to surface accidental misuse
-    // early.
-    if depth >= 32 {
-        return Err(format!(
-            "depth {depth} out of supported range (5/8/11 in production)"
-        ));
+    // Only the three baked tiers verify on-chain: depth 5 (Small,
+    // ≤32 members), 8 (Medium, ≤256), 11 (Large, ≤2048). The
+    // prover would happily accept any depth ≤ 31, and the FFI's
+    // own self-verify against the freshly-baked VK would pass —
+    // but no on-chain `bake_*_vk(d)` exists for d ∉ {5,8,11}, so
+    // such proofs are unshippable. Reject up-front instead of
+    // letting an SDK ship a proof no contract can verify.
+    match depth {
+        5 | 8 | 11 => Ok(()),
+        _ => Err(format!(
+            "depth {depth} is not a supported tier; valid tiers: 5 (Small), 8 (Medium), 11 (Large)"
+        )),
     }
-    Ok(())
 }
 
 /// Build a fully-populated Poseidon Merkle tree from a roster of

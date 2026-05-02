@@ -253,6 +253,47 @@ fn prove_update_then_verify_against_baked_vk() {
 }
 
 #[test]
+fn prove_create_rejects_unsupported_tier() {
+    // Audit Finding 1 regression: prove_* must restrict depth to the
+    // three tiers an on-chain VK exists for (5/8/11). See
+    // sep-anarchy-ffi's analogous test for the full rationale.
+    let secret_keys: Vec<Fr> = (1u64..=4).map(Fr::from).collect();
+    let leaves_packed = pack_leaf_hashes_from_secret_keys(&secret_keys);
+    let admin_sk_be = fr_be(&secret_keys[0]);
+    let group_id_be = fr_be(&Fr::from(0x7777u64));
+    let salt = [0u8; 32];
+
+    for bad_depth in [0usize, 1, 4, 6, 7, 9, 10, 12, 16, 31] {
+        let mut proof_buf = OnymByteBuffer { ptr: ptr::null_mut(), len: 0 };
+        let mut pi_buf = OnymByteBuffer { ptr: ptr::null_mut(), len: 0 };
+        let mut err: *mut std::os::raw::c_char = ptr::null_mut();
+        let ok = unsafe {
+            onym_tyranny_prove_create(
+                bad_depth,
+                leaves_packed.as_ptr(),
+                leaves_packed.len(),
+                admin_sk_be.as_ptr(),
+                admin_sk_be.len(),
+                0,
+                group_id_be.as_ptr(),
+                group_id_be.len(),
+                salt.as_ptr(),
+                salt.len(),
+                &mut proof_buf,
+                &mut pi_buf,
+                &mut err,
+            )
+        };
+        assert!(
+            !ok,
+            "depth={bad_depth} should be rejected — only 5/8/11 have on-chain VKs"
+        );
+        assert!(!err.is_null(), "depth={bad_depth} should populate out_error");
+        let _ = unsafe { std::ffi::CString::from_raw(err) };
+    }
+}
+
+#[test]
 fn prove_create_rejects_mismatched_admin_secret_key() {
     let secret_keys: Vec<Fr> = (1u64..=8).map(Fr::from).collect();
     let leaves_packed = pack_leaf_hashes_from_secret_keys(&secret_keys);

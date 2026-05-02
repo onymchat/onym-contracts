@@ -154,12 +154,14 @@ fn parse_leaf_hashes(packed: &[u8], label: &str) -> Result<Vec<Fr>, String> {
 }
 
 fn check_depth(depth: usize) -> Result<(), String> {
-    if depth >= 32 {
-        return Err(format!(
-            "depth {depth} out of supported range (5/8/11 in production)"
-        ));
+    // Only the three baked tiers verify on-chain: depth 5 / 8 / 11.
+    // See sep-anarchy-ffi's check_depth for full rationale.
+    match depth {
+        5 | 8 | 11 => Ok(()),
+        _ => Err(format!(
+            "depth {depth} is not a supported tier; valid tiers: 5 (Small), 8 (Medium), 11 (Large)"
+        )),
     }
-    Ok(())
 }
 
 fn build_tree_from_leaves(leaves: &[Fr], depth: usize) -> (Fr, Vec<Fr>) {
