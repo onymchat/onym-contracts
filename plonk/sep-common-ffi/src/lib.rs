@@ -12,7 +12,6 @@
 //! `panic = "unwind"`.
 
 use std::ffi::{c_char, CString};
-use std::mem;
 use std::ptr;
 use std::slice;
 
@@ -55,14 +54,23 @@ pub struct OnymByteBuffer {
     pub len: usize,
 }
 
-fn buffer_from_vec(mut bytes: Vec<u8>) -> OnymByteBuffer {
-    bytes.shrink_to_fit();
-    let buffer = OnymByteBuffer {
-        ptr: bytes.as_mut_ptr(),
-        len: bytes.len(),
-    };
-    mem::forget(bytes);
-    buffer
+fn buffer_from_vec(bytes: Vec<u8>) -> OnymByteBuffer {
+    // Round-trip via Box<[u8]> so the freeing side doesn't need a
+    // capacity field. `into_boxed_slice` shrinks the allocation to
+    // exactly `len`; `Box::into_raw` hands ownership to C as a fat
+    // pointer that we decompose into (ptr, len). The free function
+    // reattaches the slice metadata via `slice_from_raw_parts_mut`
+    // and reclaims via `Box::from_raw` — no capacity ambiguity.
+    //
+    // The previous Vec-based round-trip relied on `shrink_to_fit`
+    // setting capacity == len, which the allocator does NOT
+    // guarantee — `Vec::from_raw_parts(ptr, len, len)` then handed
+    // a wrong-capacity Vec to the allocator at drop time, which is
+    // UB.
+    let boxed: Box<[u8]> = bytes.into_boxed_slice();
+    let len = boxed.len();
+    let ptr = Box::into_raw(boxed) as *mut u8;
+    OnymByteBuffer { ptr, len }
 }
 
 fn write_buffer(out: *mut OnymByteBuffer, bytes: Vec<u8>) -> Result<(), String> {
@@ -144,15 +152,21 @@ fn fr_to_be_bytes(fr: &Fr) -> Vec<u8> {
 /// Free a buffer previously written by any `onym_*` function.
 ///
 /// # Safety
-/// `buffer.ptr` must have been allocated by this library. Passing a
-/// zero-len buffer (the `{ NULL, 0 }` shape callers use to indicate "no
-/// output") is a no-op.
+/// `buffer.ptr` must have been allocated by this library via
+/// `buffer_from_vec` (i.e. ultimately a `Box<[u8]>::into_raw`).
+/// Passing a zero-len buffer (the `{ NULL, 0 }` shape callers use to
+/// indicate "no output") is a no-op.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn onym_byte_buffer_free(buffer: OnymByteBuffer) {
     if buffer.ptr.is_null() || buffer.len == 0 {
         return;
     }
-    let _ = unsafe { Vec::from_raw_parts(buffer.ptr, buffer.len, buffer.len) };
+    // Reattach the slice metadata and reclaim. Matches the
+    // `into_boxed_slice` allocation in `buffer_from_vec`: the
+    // allocator sees exactly the (ptr, len) it originally returned,
+    // no capacity guesswork.
+    let slice_ptr = std::ptr::slice_from_raw_parts_mut(buffer.ptr, buffer.len);
+    let _ = unsafe { Box::from_raw(slice_ptr) };
 }
 
 /// Free a C string previously returned via `out_error`.

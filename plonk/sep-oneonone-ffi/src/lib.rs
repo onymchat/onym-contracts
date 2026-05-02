@@ -5,7 +5,6 @@
 //! ABI conventions and helper-inlining rationale.
 
 use std::ffi::{c_char, CString};
-use std::mem;
 use std::ptr;
 use std::slice;
 
@@ -38,14 +37,16 @@ pub struct OnymByteBuffer {
     pub len: usize,
 }
 
-fn buffer_from_vec(mut bytes: Vec<u8>) -> OnymByteBuffer {
-    bytes.shrink_to_fit();
-    let buffer = OnymByteBuffer {
-        ptr: bytes.as_mut_ptr(),
-        len: bytes.len(),
-    };
-    mem::forget(bytes);
-    buffer
+fn buffer_from_vec(bytes: Vec<u8>) -> OnymByteBuffer {
+    // See sep-common-ffi/src/lib.rs for the full rationale: round-trip
+    // via Box<[u8]> so the freeing side (sep-common-ffi's
+    // onym_byte_buffer_free) doesn't need to guess at capacity. The
+    // previous Vec::from_raw_parts(ptr, len, len) shape was UB
+    // whenever shrink_to_fit left capacity > len.
+    let boxed: Box<[u8]> = bytes.into_boxed_slice();
+    let len = boxed.len();
+    let ptr = Box::into_raw(boxed) as *mut u8;
+    OnymByteBuffer { ptr, len }
 }
 
 fn write_buffer(out: *mut OnymByteBuffer, bytes: Vec<u8>) -> Result<(), String> {
