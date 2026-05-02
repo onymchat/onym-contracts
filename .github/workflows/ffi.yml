@@ -142,16 +142,22 @@ jobs:
 
           # FAIL: non-onym, non-rust-runtime symbols (FFI leak from a
           # transitive dep that exported #[no_mangle] symbols). The
-          # allowlist covers Rust's mangled names (_ZN / _RNv / _RIN*),
-          # eh-personality (rust_*), platform compiler-builtins (__*),
-          # debug sections (DW.*, .L*, .*), standard libc memory
-          # builtins, and compiler-rt float math builtins (fmaf128,
-          # sqrtf16, fmodf128, etc.) that Rust on linux-gnu emits to
-          # support stable f16 / f128 float types.
+          # allowlist covers:
+          #   * Rust's mangled names (_ZN / _RNv / _RIN*)
+          #   * eh-personality (rust_*)
+          #   * platform compiler-builtins (__*)
+          #   * debug sections (DW.*, .L*, .*)
+          #   * standard libc memory builtins (memcpy, …)
+          #   * the C99 math.h surface that Rust's libstd / libcore
+          #     re-exports on linux-gnu — every basename below can
+          #     appear bare (double), with `f` suffix (float), with
+          #     `l` (long double), or with the newer `f16/f32/f64/
+          #     f80/f128` suffix for Rust's stable f16 / f128 types.
+          MATH_BASES='sqrt|cbrt|fabs|fma|fmin|fmax|fmod|fdim|copysign|hypot|pow|exp|exp2|expm1|log|log2|log10|log1p|logb|ilogb|frexp|ldexp|modf|scalbn|scalbln|nextafter|nexttoward|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|asinh|acosh|atanh|erf|erfc|lgamma|tgamma|ceil|floor|trunc|round|lround|llround|rint|lrint|llrint|nearbyint|remainder|remquo|nan'
           STRAY=$(echo "$ALL_DEFINED" \
                   | grep -vE '^(onym_|rust_|__|_ZN|_RNv|_RINv|_RNC|_RNCs|_RNCsv|_RINvCs|DW\.|\.L|\.|$)' \
                   | grep -vE '^(memcpy|memmove|memset|memcmp|bcmp|strlen)$' \
-                  | grep -vE '^[a-z][a-z0-9]*f(16|32|64|80|128)$' || true)
+                  | grep -vE "^(${MATH_BASES})[fl]?(16|32|64|80|128)?$" || true)
           if [ -n "$STRAY" ]; then
             echo "FAIL: ${{ matrix.crate }} exports non-onym, non-rust-runtime symbols (likely FFI leak from a dep):"
             echo "$STRAY"
