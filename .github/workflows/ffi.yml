@@ -144,11 +144,14 @@ jobs:
           # transitive dep that exported #[no_mangle] symbols). The
           # allowlist covers Rust's mangled names (_ZN / _RNv / _RIN*),
           # eh-personality (rust_*), platform compiler-builtins (__*),
-          # debug sections (DW.*, .L*, .*), and standard libc memory
-          # builtins that Rust's linker may emit.
+          # debug sections (DW.*, .L*, .*), standard libc memory
+          # builtins, and compiler-rt float math builtins (fmaf128,
+          # sqrtf16, fmodf128, etc.) that Rust on linux-gnu emits to
+          # support stable f16 / f128 float types.
           STRAY=$(echo "$ALL_DEFINED" \
                   | grep -vE '^(onym_|rust_|__|_ZN|_RNv|_RINv|_RNC|_RNCs|_RNCsv|_RINvCs|DW\.|\.L|\.|$)' \
-                  | grep -vE '^(memcpy|memmove|memset|memcmp|bcmp|strlen)$' || true)
+                  | grep -vE '^(memcpy|memmove|memset|memcmp|bcmp|strlen)$' \
+                  | grep -vE '^[a-z][a-z0-9]*f(16|32|64|80|128)$' || true)
           if [ -n "$STRAY" ]; then
             echo "FAIL: ${{ matrix.crate }} exports non-onym, non-rust-runtime symbols (likely FFI leak from a dep):"
             echo "$STRAY"
