@@ -1,31 +1,27 @@
 #!/usr/bin/env bash
-# pq/sep-anarchy gas bench driver (skeleton).
+# pq/sep-anarchy gas bench driver.
 #
-# Coverage today:
-#   * `deploy`                         — full deploy fee.
-#   * `set_restricted_mode(true|false)` — admin op, no proof needed.
-#   * `bump_group_ttl(<unknown_id>)`   — revert-mode (GroupNotFound);
-#                                         captures storage-read floor.
-#   * `create_group` (revert mode)     — malformed proof bytes; the
-#                                         FRI verifier parser rejects
-#                                         at its first length gate.
-#                                         Captures the early-rejection
-#                                         floor: deserialise + replay-
-#                                         check + parser entry.
-#   * `verify_membership` (revert)     — revert-mode (GroupNotFound).
+# Coverage:
+#   * deploy
+#   * set_restricted_mode (true / false)
+#   * create_group        — real FRI proof from `gen-pq-proof`
+#   * verify_membership   — same proof, group exists post-create
+#   * update_commitment   — fresh update proof (c_old / c_new)
+#   * bump_group_ttl      — TTL extend on the post-create group
 #
-# Coverage explicitly NOT here yet:
-#   * Real-proof `create_group` / `update_commitment` /
-#     `verify_membership`. The PQ prover (off-chain Plonky3-shape
-#     polynomial commit + FRI prover) does not exist yet, so the
-#     contract has no proof bytes that would clear `verify_fri`. As
-#     soon as the PQ prover lands, the matching `bench_gen_*_proof`
-#     wrappers go into `lib.sh` and this driver picks up the same
-#     `run_tier`-style real-proof rows the PLONK driver has.
+# State chain (single group_id throughout):
+#   1. create_group at epoch=0 with commitment Cm, member_count=8.
+#   2. verify_membership re-uses the same membership proof + PI;
+#      contract checks PI against stored state — matches.
+#   3. update_commitment with epoch_old=0, c_old=Cm, c_new=Cn.
+#   4. bump_group_ttl extends the post-update group's TTL.
 #
-# State: no group ever gets successfully created in this run, so all
-# group-state reads return `GroupNotFound`. That is intentional —
-# revert-mode rows are useful as the floor cost for those entrypoints.
+# Bench-only safety: the FRI prover behind `gen-pq-proof` produces
+# self-consistent proofs the on-chain verifier accepts, but does NOT
+# prove anything about an underlying circuit (no batched-PCS layer
+# yet). These rows measure on-chain verifier+storage cost; they say
+# nothing about the security of any real PQ flavor — see
+# `pq/verifier/src/lib.rs` for the open-work list.
 
 set -euo pipefail
 
@@ -59,53 +55,71 @@ bench_invoke "$CID" "set_restricted_mode" "n/a" "set_restricted_mode" \
     --restricted true
 
 echo "==> [$BENCH_CURRENT_CONTRACT] set_restricted_mode(false)"
-# Toggle back so the bench is idempotent across re-runs against the
-# same testnet account state. The bench identity is admin, so the
-# call clears restricted mode for any subsequent op.
 bench_invoke "$CID" "set_restricted_mode" "n/a" "set_restricted_mode" \
     --restricted false
 
-# ---------- revert-mode rows (no group exists) ----------
+# ---------- per-group state chain with real FRI proofs ----------
 
-# Distinct group_id, never created — exercises the GroupNotFound
-# revert path on the read-only and TTL-bump entrypoints. High byte
-# 0x50 keeps the bytes canonical-Fr-shaped at every 4-byte chunk.
+# group_id: high byte 0x50 keeps every 4-byte LE chunk canonical Fr.
 GROUP_ID_HEX="50$(printf '00%.0s' $(seq 1 31))"
 
-echo "==> [$BENCH_CURRENT_CONTRACT] bump_group_ttl (revert: GroupNotFound)"
-bench_invoke "$CID" "bump_group_ttl" "n/a" "bump_group_ttl" \
-    --group-id "$GROUP_ID_HEX"
+# Commitment Cm and Cn — both must satisfy `is_canonical_pi`: each
+# 4-byte LE chunk < BabyBear P (0x78000001). The contract reads each
+# chunk as `u32::from_le_bytes(bytes[off..off+4])`, so byte
+# `off + 3` is the chunk's MSB and must be `<= 0x77` for the chunk
+# to land strictly below P.
+#
+# Pattern below: each 4-byte chunk = `LL 00 00 00` LE = `0x000000LL`
+# = LL (small integer). 8 chunks of 4 bytes = 32 bytes total. Cm and
+# Cn use distinct LSB-byte values so they decode to different Fr
+# vectors.
+mk_commitment() {
+    local lsb="$1"  # two hex chars: chunk LSB
+    local chunk="${lsb}000000"
+    printf '%s%s%s%s%s%s%s%s' "$chunk" "$chunk" "$chunk" "$chunk" \
+                              "$chunk" "$chunk" "$chunk" "$chunk"
+}
+COMMITMENT_HEX="$(mk_commitment 10)"
+COMMITMENT_NEW_HEX="$(mk_commitment 20)"
 
-# Commitment = 32 zero bytes: every 4-byte LE chunk is `0 < P`, so
-# `is_canonical_pi` accepts. The PI vector mirrors what the contract
-# expects for membership: `(commitment, epoch_be=0)` — both are
-# 32-byte all-zero values, which the on-chain checker accepts.
-COMMITMENT_HEX="$(printf '00%.0s' $(seq 1 32))"
-EPOCH_ZERO_HEX="$COMMITMENT_HEX"
-PI_JSON="[\"$COMMITMENT_HEX\",\"$EPOCH_ZERO_HEX\"]"
+echo "==> [$BENCH_CURRENT_CONTRACT] generating membership proof (epoch=0)"
+bench_gen_pq_membership_proof "$COMMITMENT_HEX" 0 "$WORK/membership"
+mp_proof_hex="$(bench_gen_proof_hex "$WORK/membership")"
+mp_pi_json="$(bench_gen_pi_json "$WORK/membership")"
 
-# Malformed proof: 4 bytes whose `num_layers_plus_1 = u32_le` exceeds
-# the parser's `MAX_LAYERS + 1` cap. The contract clears length / hash
-# / replay gates and reaches `verify_fri_proof`, which rejects at the
-# parser's `OutOfRange` arm. Captured fee = "minimum cost to land at
-# the verifier and bounce" — the floor below which no successful
-# create_group can run.
-MALFORMED_PROOF_HEX="deadbeef"
-
-echo "==> [$BENCH_CURRENT_CONTRACT] create_group (revert: InvalidProof, malformed bytes)"
+echo "==> [$BENCH_CURRENT_CONTRACT] create_group"
 bench_invoke "$CID" "create_group" "n/a" "create_group" \
     --caller "$BENCH_DEPLOYER_ADDRESS" \
     --group-id "$GROUP_ID_HEX" \
     --commitment "$COMMITMENT_HEX" \
     --tier 0 \
-    --member-count 0 \
-    --proof "$MALFORMED_PROOF_HEX" \
-    --public-inputs "$PI_JSON"
+    --member-count 8 \
+    --proof "$mp_proof_hex" \
+    --public-inputs "$mp_pi_json"
 
-echo "==> [$BENCH_CURRENT_CONTRACT] verify_membership (revert: GroupNotFound)"
+echo "==> [$BENCH_CURRENT_CONTRACT] verify_membership (read-only; same proof)"
+# Note: the contract's `check_proof_replay` only fires for state-
+# changing entrypoints (create_group / update_commitment).
+# verify_membership is read-only and re-uses the same proof bytes
+# without consuming the global nullifier.
 bench_invoke "$CID" "verify_membership" "n/a" "verify_membership" \
     --group-id "$GROUP_ID_HEX" \
-    --proof "$MALFORMED_PROOF_HEX" \
-    --public-inputs "$PI_JSON"
+    --proof "$mp_proof_hex" \
+    --public-inputs "$mp_pi_json"
+
+echo "==> [$BENCH_CURRENT_CONTRACT] generating update proof (c_old → c_new, epoch_old=0)"
+bench_gen_pq_update_proof "$COMMITMENT_HEX" 0 "$COMMITMENT_NEW_HEX" "$WORK/update"
+up_proof_hex="$(bench_gen_proof_hex "$WORK/update")"
+up_pi_json="$(bench_gen_pi_json "$WORK/update")"
+
+echo "==> [$BENCH_CURRENT_CONTRACT] update_commitment"
+bench_invoke "$CID" "update_commitment" "n/a" "update_commitment" \
+    --group-id "$GROUP_ID_HEX" \
+    --proof "$up_proof_hex" \
+    --public-inputs "$up_pi_json"
+
+echo "==> [$BENCH_CURRENT_CONTRACT] bump_group_ttl"
+bench_invoke "$CID" "bump_group_ttl" "n/a" "bump_group_ttl" \
+    --group-id "$GROUP_ID_HEX"
 
 echo "==> [$BENCH_CURRENT_CONTRACT] done"

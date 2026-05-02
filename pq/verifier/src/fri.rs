@@ -225,6 +225,11 @@ pub fn verify_fri(
             //   f_{i+1}(x^2) = (p + p_neg)/2 + β_i · (p - p_neg)/(2 · ω_i^pos_idx)
             //
             // ω_i^pos_idx is the x-coordinate at the positive parent.
+            // Note the formula is the same for queries in either half
+            // of layer i: when the original query was in the upper
+            // half (`idx >= half`), the negation `-x = ω_i^(pos_idx +
+            // half)` causes `(-1) · (1/-x)` to cancel, leaving the
+            // identical expression in pos_idx terms.
             let omega_at_pos = omega.pow(pos_idx as u64);
             let omega_at_pos_inv = omega_at_pos.inverse();
 
@@ -234,9 +239,21 @@ pub fn verify_fri(
             let folded = (sum * params.two_inv)
                 + beta * (diff * params.two_inv * omega_at_pos_inv);
 
-            // The next-layer parent at this query: `query_values[q][i+1].0`.
-            let next_pos = proof.query_values[q][i + 1].0;
-            if folded != next_pos {
+            // `folded = f_{i+1}[pos_idx]` — the position at layer i+1
+            // is the *carried* pos_idx, NOT pos_idx mod half_{i+1}.
+            // Layer i+1 has size `half`, so its half is `half/2`. If
+            // `pos_idx < half/2`, the carried position is in layer
+            // i+1's lower half and matches `query_values[q][i+1].0`;
+            // otherwise it's in the upper half and matches `.1`. (The
+            // prover stores layer i+1's openings sub-mirrored the
+            // same way layer i's are.)
+            let half_next = half / 2;
+            let next_value = if pos_idx < half_next {
+                proof.query_values[q][i + 1].0
+            } else {
+                proof.query_values[q][i + 1].1
+            };
+            if folded != next_value {
                 return Err(FriError::FoldMismatch);
             }
 
@@ -247,16 +264,23 @@ pub fn verify_fri(
             omega_inv = omega_inv * omega_inv;
         }
 
-        // Final-layer check: at this point `idx ∈ [0, layer_size)`,
-        // and `proof.query_values[q][num_layers].0` should equal
-        // the final polynomial evaluated at `ω_final^idx`.
+        // Final-layer check: `idx ∈ [0, layer_size)` is the carried
+        // position at the final layer, and the Horner evaluation of
+        // `proof.final_poly` at `ω_final^idx` should equal the
+        // queried final-layer value. The prover sub-mirrors the
+        // final layer the same way as the fold layers, so we pick
+        // `.0` or `.1` based on which half `idx` lands in.
         let final_x = omega.pow(idx as u64);
         let mut acc = Fr::ZERO;
-        // Horner's evaluation.
         for c in proof.final_poly.iter().rev() {
             acc = acc * final_x + *c;
         }
-        let claimed = proof.query_values[q][params.num_layers as usize].0;
+        let half_final = layer_size / 2;
+        let claimed = if idx < half_final {
+            proof.query_values[q][params.num_layers as usize].0
+        } else {
+            proof.query_values[q][params.num_layers as usize].1
+        };
         if acc != claimed {
             return Err(FriError::FinalLayerMismatch);
         }

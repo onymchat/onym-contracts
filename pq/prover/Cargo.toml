@@ -1,0 +1,27 @@
+[package]
+name = "pq-fri-prover"
+version = "0.1.0"
+edition = "2021"
+description = "Off-chain FRI prover for the pq-sep-* contract suite. Bench-scoped: produces self-consistent FRI proofs that the on-chain verifier accepts. Does NOT yet prove anything about an underlying circuit — the batched-PCS layer that ties FRI to an AIR is a follow-up. Use only for gas-cost measurement, not as a security gadget."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+# The prover reuses the verifier's no_std primitives — field
+# arithmetic, Poseidon2 software fallback, sponge transcript, and
+# Merkle-path verifier — so the bytes the prover emits are
+# byte-equivalent to what the verifier hashes/verifies. The off-chain
+# `host_poseidon2::permute` falls through to the same software
+# Poseidon2 the on-chain wasm path uses (until the host primitive's
+# SDK surface lands), keeping prover/verifier symmetric.
+[dependencies]
+fri-verifier = { path = "../verifier" }
+soroban-sdk = "=26.0.0-rc.1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true

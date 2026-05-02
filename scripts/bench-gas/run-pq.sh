@@ -71,6 +71,17 @@ stellar contract build \
     --manifest-path "$REPO_ROOT/pq/sep-anarchy/Cargo.toml" \
     --out-dir "$BENCH_ARTIFACT_DIR" >/dev/null
 
+# Off-chain prover binary used by `pq-sep-anarchy.sh` to generate
+# real FRI proofs for `create_group` / `verify_membership` /
+# `update_commitment`. Bench-only (no PCS layer; see prover crate
+# docs).
+echo "==> building gen-pq-proof"
+cargo build \
+    --manifest-path "$REPO_ROOT/pq/prover/Cargo.toml" \
+    --release \
+    --bin gen-pq-proof >/dev/null
+export BENCH_PQ_PROVER_BIN="$REPO_ROOT/pq/prover/target/release/gen-pq-proof"
+
 echo "==> setup complete"
 
 # ---------- per-contract drivers ----------

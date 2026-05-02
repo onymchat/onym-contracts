@@ -202,19 +202,28 @@ def notes_for_flavor(flavor: str) -> list[str]:
     common = ["- Stroops are testnet stroops; 1 XLM = 10,000,000 stroops."]
     if flavor == "pq":
         return common + [
-            "- The PQ flavor has no off-chain prover yet, so every `create_group` / "
-            "`verify_membership` / `update_commitment` row in this run is captured "
-            "in **revert mode** — the FRI verifier rejects at its parser's first "
-            "length gate. The `Stroops` column is therefore the *floor* cost for "
-            "the entrypoint (deserialise + replay-check + parser entry), not the "
-            "success-path cost. Real-proof rows will replace these once the PQ "
-            "prover lands and feeds `gen-pq-membership-proof` / "
-            "`gen-pq-update-proof` analogues into the bench driver.",
-            "- `bump_group_ttl` and `verify_membership` revert via `GroupNotFound`: "
-            "no group is ever successfully created in this skeleton run, so every "
-            "lookup returns the not-found error.",
-            "- See the `pq/verifier` crate docs for the open-work list: batched "
-            "PCS layer, prover-side fixtures, canonical Poseidon2 round constants.",
+            "- `create_group` / `verify_membership` / `update_commitment` rows "
+            "are real on-chain FRI verifications: the off-chain `gen-pq-proof` "
+            "binary in `pq/prover/` produces self-consistent FRI proofs the "
+            "on-chain verifier accepts at bench-scope parameters "
+            "(log_n=6, num_layers=3, num_queries=8, blowup=2). Proof size: "
+            "~8 KB.",
+            "- These numbers are **bench-scope only**: the on-chain verifier "
+            "today runs the FRI low-degree test alone, with no batched-PCS "
+            "layer tying FRI to an AIR. So the proofs prove "
+            "\"prover committed to a low-degree polynomial\" and nothing more — "
+            "they do not encode any circuit witness. Do **not** deploy the "
+            "contract behind this verifier for production; the `verifier_pcs` "
+            "follow-up is the gating dependency.",
+            "- `set_restricted_mode` second toggle is cheaper than the first "
+            "because the storage slot already exists by then (the second write "
+            "skips creation overhead).",
+            "- `verify_membership` is read-only and does not consume the global "
+            "nullifier — the same proof bytes can be re-submitted without "
+            "burning `UsedProof` storage. Same convention as the PLONK flavor.",
+            "- See `pq/verifier/src/lib.rs` for the open-work list: batched "
+            "PCS layer, prover-side fixtures from a real circuit, canonical "
+            "Plonky3 Poseidon2 round constants.",
         ]
     if flavor == "plonk":
         return common + [

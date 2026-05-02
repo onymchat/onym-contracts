@@ -126,6 +126,47 @@ bench_gen_proof_hex() { cat "$1/proof.hex"; }
 bench_gen_pi_json()   { cat "$1/public_inputs.json"; }
 bench_gen_commitment_hex() { cat "$1/commitment.hex"; }
 
+# ---------- PQ FRI proof generators ----------
+# Wrappers around the `gen-pq-proof` binary in `pq/prover/`. The PQ
+# orchestrator (`run-pq.sh`) builds the binary and exports
+# `BENCH_PQ_PROVER_BIN`; these helpers shell out to it. Output
+# artefacts share the layout the PLONK helpers above produce
+# (proof.bin / proof.hex / commitment.hex / public_inputs.json) so
+# `bench_gen_proof_hex` etc. work unchanged.
+#
+# Bench-only: the prover produces self-consistent FRI proofs the
+# on-chain verifier accepts but does NOT prove anything about an
+# underlying circuit (no batched-PCS layer yet). Use only for gas
+# measurement.
+
+# bench_gen_pq_membership_proof <commitment_hex_64> <epoch_u64> <out_dir>
+bench_gen_pq_membership_proof() {
+    local commitment_hex="$1"
+    local epoch="$2"
+    local out_dir="$3"
+    mkdir -p "$out_dir"
+    "$BENCH_PQ_PROVER_BIN" \
+        --circuit membership \
+        --commitment "$commitment_hex" \
+        --epoch "$epoch" \
+        --out-dir "$out_dir" >&2
+}
+
+# bench_gen_pq_update_proof <c_old_hex_64> <epoch_old_u64> <c_new_hex_64> <out_dir>
+bench_gen_pq_update_proof() {
+    local c_old_hex="$1"
+    local epoch_old="$2"
+    local c_new_hex="$3"
+    local out_dir="$4"
+    mkdir -p "$out_dir"
+    "$BENCH_PQ_PROVER_BIN" \
+        --circuit update \
+        --commitment "$c_old_hex" \
+        --epoch "$epoch_old" \
+        --new-commitment "$c_new_hex" \
+        --out-dir "$out_dir" >&2
+}
+
 # ---------- invocation + fee capture ----------
 
 # capture_tx_hashes <stderr_logfile>
