@@ -99,4 +99,10 @@ echo "==> [$BENCH_CURRENT_CONTRACT] set_restricted_mode(true)"
 bench_invoke "$CID" "set_restricted_mode" "n/a" "set_restricted_mode" \
     --restricted true
 
+# Leave the contract unrestricted so the relayer's allowlisted callers
+# can actually call create_group post-release. See sep-anarchy.sh.
+echo "==> [$BENCH_CURRENT_CONTRACT] set_restricted_mode(false)"
+bench_invoke "$CID" "set_restricted_mode" "n/a" "set_restricted_mode_off" \
+    --restricted false
+
 echo "==> [$BENCH_CURRENT_CONTRACT] done"

@@ -97,4 +97,14 @@ echo "==> [$BENCH_CURRENT_CONTRACT] set_restricted_mode(true)"
 bench_invoke "$CID" "set_restricted_mode" "n/a" "set_restricted_mode" \
     --restricted true
 
+# Leave the contract unrestricted so the relayer's allowlisted callers
+# (e.g. onym-relayer's bench-deployed identity vs. the contract's
+# stored Admin) can actually call create_group post-release. The
+# `set_restricted_mode(true)` measurement above covers the restricted-
+# mode gas cost; this one captures the unrestrict cost as a bonus
+# data point and ends in a usable state.
+echo "==> [$BENCH_CURRENT_CONTRACT] set_restricted_mode(false)"
+bench_invoke "$CID" "set_restricted_mode" "n/a" "set_restricted_mode_off" \
+    --restricted false
+
 echo "==> [$BENCH_CURRENT_CONTRACT] done"
