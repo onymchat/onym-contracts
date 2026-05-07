@@ -11,16 +11,16 @@ crate-type = ["cdylib"]
 doctest = false
 
 [dependencies]
-# Same SDK floor as plonk/sep-anarchy (=26.0.0-rc.1, requires rustc
-# 1.91.0). The PQ verifier reaches into `env.crypto()` for the
-# Poseidon2 host primitive — that surface is the same release.
-soroban-sdk = { version = "=26.0.0-rc.1", features = ["alloc"] }
+# Same SDK pin as plonk/sep-anarchy (=26.0.0; rustc floor 1.91.0).
+# The PQ verifier reaches into `env.crypto()` for the Poseidon2
+# host primitive — that surface is the same release.
+soroban-sdk = { version = "=26.0.0", features = ["alloc"] }
 
 # Shared no_std FRI verifier — single entry point this contract calls.
 fri-verifier = { path = "../verifier" }
 
 [dev-dependencies]
-soroban-sdk = { version = "=26.0.0-rc.1", features = ["alloc", "testutils"] }
+soroban-sdk = { version = "=26.0.0", features = ["alloc", "testutils"] }
 
 [profile.release]
 opt-level = "z"

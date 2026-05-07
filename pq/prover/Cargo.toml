@@ -24,7 +24,7 @@ fri-verifier = { path = "../verifier" }
 # returns an env that traps on every host call. Pulling testutils
 # in unconditionally is fine for an off-chain bench tool — it never
 # ships in a Soroban WASM build.
-soroban-sdk = { version = "=26.0.0-rc.1", features = ["hazmat-crypto", "testutils"] }
+soroban-sdk = { version = "=26.0.0", features = ["hazmat-crypto", "testutils"] }
 clap = { version = "4", features = ["derive"] }
 
 [profile.release]
