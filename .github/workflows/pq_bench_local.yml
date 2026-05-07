@@ -107,20 +107,37 @@ jobs:
             "$QUICKSTART_IMAGE" \
             --local --enable-soroban-rpc
 
-          # Wait for friendbot to respond — that signals core +
-          # soroban-rpc are both up. Bound at 90s; quickstart cold
-          # boot is typically 30-45s on ubuntu-latest.
-          for i in $(seq 1 45); do
-            if curl -sSf "http://localhost:8000/friendbot" -o /dev/null 2>&1 \
-               || curl -sS "http://localhost:8000/friendbot" 2>&1 | grep -q "invalid_field"; then
-              echo "stellar-local ready after ${i} polls"
-              exit 0
+          # Probe stellar-rpc's `getHealth` — universal, version-stable
+          # readiness signal. The response shape is
+          #   {"jsonrpc":"2.0","id":1,"result":{"status":"healthy", ...}}
+          # so we grep for `"status":"healthy"` to confirm both core
+          # and rpc are up.
+          #
+          # Why not friendbot: its error response shape varies between
+          # quickstart versions, so probing it gives false negatives.
+          # Why 180s: cold boot on ubuntu-latest can take ~90s for core
+          # sync alone; allow generous headroom before failing.
+          ready=0
+          for i in $(seq 1 90); do
+            response="$(curl -sS -X POST \
+              -H 'Content-Type: application/json' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' \
+              http://localhost:8000/rpc 2>/dev/null || true)"
+            if printf '%s' "$response" | grep -q '"status":"healthy"'; then
+              echo "stellar-local ready after ${i} polls (~$((i * 2))s)"
+              ready=1
+              break
             fi
             sleep 2
           done
-          echo "stellar-local did not become ready in 90s" >&2
-          docker logs stellar-local >&2 || true
-          exit 1
+          if [ "$ready" -ne 1 ]; then
+            echo "::error::stellar-local did not become ready in 180s"
+            echo "--- last getHealth response ---"
+            printf '%s\n' "$response"
+            echo "--- docker logs (tail 100) ---"
+            docker logs --tail 100 stellar-local 2>&1 || true
+            exit 1
+          fi
 
       - name: Configure stellar CLI for local network
         run: |
