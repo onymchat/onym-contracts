@@ -107,24 +107,41 @@ jobs:
             "$QUICKSTART_IMAGE" \
             --local --enable-soroban-rpc
 
-          # Probe stellar-rpc's `getHealth` — universal, version-stable
-          # readiness signal. The response shape is
-          #   {"jsonrpc":"2.0","id":1,"result":{"status":"healthy", ...}}
-          # so we grep for `"status":"healthy"` to confirm both core
-          # and rpc are up.
+          # Probe BOTH stellar-rpc's `getHealth` AND nginx-proxied
+          # friendbot. RPC alone isn't enough: in run #25505142449
+          # getHealth went healthy ~30s before friendbot's upstream
+          # was reachable through nginx, so the next step's curl to
+          # /friendbot returned 502 Bad Gateway and failed.
           #
-          # Why not friendbot: its error response shape varies between
-          # quickstart versions, so probing it gives false negatives.
-          # Why 180s: cold boot on ubuntu-latest can take ~90s for core
-          # sync alone; allow generous headroom before failing.
+          # RPC: response is `{"result":{"status":"healthy",...}}`.
+          # Friendbot: any non-5xx response counts as ready (a 400
+          # "missing addr" reply proves the upstream is reachable;
+          # 502/503/504 mean nginx routes the path but friendbot
+          # isn't responding yet; 000 is curl-side failure).
+          #
+          # Why 180s: cold boot on ubuntu-latest can take ~90s for
+          # core sync alone, plus another ~30s for friendbot.
           ready=0
+          rpc_response=""
+          fb_status=000
           for i in $(seq 1 90); do
-            response="$(curl -sS -X POST \
+            rpc_response="$(curl -sS -X POST \
               -H 'Content-Type: application/json' \
               -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' \
               http://localhost:8000/rpc 2>/dev/null || true)"
-            if printf '%s' "$response" | grep -q '"status":"healthy"'; then
-              echo "stellar-local ready after ${i} polls (~$((i * 2))s)"
+            rpc_ok=0
+            printf '%s' "$rpc_response" | grep -q '"status":"healthy"' && rpc_ok=1
+
+            fb_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+              http://localhost:8000/friendbot 2>/dev/null || echo 000)"
+            fb_ok=0
+            case "$fb_status" in
+              000|502|503|504) ;;
+              *) fb_ok=1 ;;
+            esac
+
+            if [ "$rpc_ok" -eq 1 ] && [ "$fb_ok" -eq 1 ]; then
+              echo "stellar-local ready after ${i} polls (~$((i * 2))s, rpc + friendbot up)"
               ready=1
               break
             fi
@@ -133,7 +150,9 @@ jobs:
           if [ "$ready" -ne 1 ]; then
             echo "::error::stellar-local did not become ready in 180s"
             echo "--- last getHealth response ---"
-            printf '%s\n' "$response"
+            printf '%s\n' "$rpc_response"
+            echo "--- last friendbot HTTP status ---"
+            printf '%s\n' "$fb_status"
             echo "--- docker logs (tail 100) ---"
             docker logs --tail 100 stellar-local 2>&1 || true
             exit 1
