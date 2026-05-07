@@ -1,0 +1,4 @@
+[toolchain]
+# Soroban SDK 26 requires rustc ≥ 1.91.0; soroban-sdk's contract
+# build wrapper rejects 1.81/1.82/1.83/1.91.0, so we pin 1.92.0.
+channel = "1.92.0"

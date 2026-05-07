@@ -1,0 +1,234 @@
+name: Release PQ Contracts
+
+# Manual dispatch only — same provenance posture as release.yml.
+# Triggered with a tag input (e.g. `pq-v0.0.1`); the tag must
+# already exist in the repo when the workflow runs.
+#
+# What this workflow does:
+#   1. The `build-contract` job builds `pq/sep-anarchy` to WASM with
+#      `stellar contract build --optimize`. The WASM carries the
+#      `source_repo` and `home_domain` metadata stamps via `--meta`
+#      so stellar.expert can link back to this repo + tag — same
+#      provenance trail clients trust on the PLONK flavor.
+#   2. The `bench-gas` job deploys the freshly-tagged contract to
+#      Stellar testnet, measures per-op fees via `stellar contract
+#      invoke`, renders a markdown table + JSONL, and overwrites the
+#      release body with the rendered table.
+#
+# Why a separate workflow vs. a matrix entry on `release.yml`:
+#   * The PQ contract crate lives at `pq/sep-anarchy`, not
+#     `plonk/sep-anarchy` — different working directory.
+#   * The PQ flavor has no prover yet. The bench-gas driver
+#     `pq-sep-anarchy.sh` covers only ops that work without a
+#     proving artefact: `deploy`, `set_restricted_mode`, and
+#     `create_group` in revert-mode (malformed proof, captures
+#     the early-rejection cost). Once the PQ prover lands, the
+#     driver picks up `verify_membership` + `update_commitment`
+#     real-proof rows the same way the PLONK driver does.
+#   * Keeping the two workflows independent means the PQ flavor
+#     can iterate without risking the PLONK release path's
+#     well-understood baseline.
+#
+# Third-party `uses:` are pinned to commit SHA (with the version
+# tag in a trailing comment) so a tag-rewrite on those repos can't
+# inject code into our release runs — same posture as release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (must already exist, e.g. pq-v0.0.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  validate-tag:
+    name: validate tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check tag format
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # Accept either `vMAJOR.MINOR.PATCH` (parity with release.yml)
+          # or `pq-vMAJOR.MINOR.PATCH` (the conventional namespace for
+          # the post-quantum flavor's pre-1.0 iteration).
+          if ! echo "$TAG" | grep -Eq '^(pq-)?v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'; then
+            echo "tag '$TAG' does not match (pq-)?vMAJOR.MINOR.PATCH(-prerelease)?" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Confirm ref resolved to an annotated/lightweight tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "ref '$TAG' is not a tag in this repository" >&2
+            exit 1
+          fi
+
+  build-contract:
+    name: build pq-sep-anarchy
+    needs: [validate-tag]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Same RUSTUP_TOOLCHAIN dance as release.yml: the contract
+      # crate's per-crate `rust-toolchain.toml` pins 1.91.0
+      # (soroban-sdk 26.0.0-rc.1 floor), but `stellar contract build`
+      # v26.0.0 has a hard-coded blocklist that rejects 1.91.0.
+      # Setting RUSTUP_TOOLCHAIN=stable wins over rust-toolchain.toml
+      # so cargo uses whatever stable is on the runner — past 1.91.0,
+      # outside the blocklist, still satisfying the soroban-sdk floor.
+      RUSTUP_TOOLCHAIN: stable
+      WORK_DIR: pq/sep-anarchy
+      PACKAGE: pq-sep-anarchy-contract
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Install stellar CLI
+        env:
+          # Pin matches release.yml's bench-gas job. v26.0.0 accepts
+          # rustc 1.91.0; the contract is fine here because we override
+          # to stable above for the build.
+          STELLAR_VERSION: '26.0.0'
+          STELLAR_SHA256: '31c83db342d1184b31f6591e739950eb45756be46dcd7bb57e4f38e91ea32e84'
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tarball="$tmp/stellar-cli.tar.gz"
+          curl -sSLf -o "$tarball" \
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_VERSION}/stellar-cli-${STELLAR_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${STELLAR_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xz -C "$tmp" -f "$tarball"
+          binary="$(find "$tmp" -maxdepth 3 -type f -name stellar -perm -u+x | head -1)"
+          test -n "$binary" || { echo "no stellar binary in tarball" >&2; exit 1; }
+          sudo install -m 0755 "$binary" /usr/local/bin/stellar
+          rm -rf "$tmp"
+          stellar --version
+
+      - name: Build contract WASM
+        working-directory: ${{ env.WORK_DIR }}
+        run: |
+          set -euo pipefail
+          out="$(mktemp -d)"
+
+          stellar contract build \
+            --optimize \
+            --package "${{ env.PACKAGE }}" \
+            --out-dir "$out" \
+            --meta "source_repo=github:${{ github.repository }}" \
+            --meta "home_domain=onym.chat"
+
+          version="$(cargo metadata --format-version=1 --no-deps \
+            | jq -r '.packages[] | select(.name == "${{ env.PACKAGE }}") | .version')"
+          test -n "$version" || { echo "no package version" >&2; exit 1; }
+
+          wasm_name="${{ env.PACKAGE }}_v${version}.wasm"
+          src="$(find "$out" -maxdepth 1 -name '*.wasm' | head -1)"
+          test -n "$src" || { echo "no wasm produced in $out" >&2; ls -la "$out" >&2; exit 1; }
+          mv "$src" "${{ github.workspace }}/$wasm_name"
+          echo "WASM_PATH=${{ github.workspace }}/$wasm_name" >> "$GITHUB_ENV"
+
+      - name: Attach WASM to release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: ${{ env.WASM_PATH }}
+          fail_on_unmatched_files: true
+
+  bench-gas:
+    needs: [build-contract]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The bench script builds the PQ contract via `stellar contract
+      # build` — same pinning rationale as release.yml: let
+      # RUSTUP_TOOLCHAIN=stable take precedence over the per-crate
+      # rust-toolchain.toml.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Rust build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: bench-gas-pq-rust-${{ hashFiles('pq/**/Cargo.toml') }}
+
+      - name: Install stellar CLI
+        env:
+          STELLAR_VERSION: '26.0.0'
+          STELLAR_SHA256: '31c83db342d1184b31f6591e739950eb45756be46dcd7bb57e4f38e91ea32e84'
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tarball="$tmp/stellar-cli.tar.gz"
+          curl -sSLf -o "$tarball" \
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_VERSION}/stellar-cli-${STELLAR_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${STELLAR_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xz -C "$tmp" -f "$tarball"
+          binary="$(find "$tmp" -maxdepth 3 -type f -name stellar -perm -u+x | head -1)"
+          test -n "$binary" || { echo "no stellar binary in tarball" >&2; exit 1; }
+          sudo install -m 0755 "$binary" /usr/local/bin/stellar
+          rm -rf "$tmp"
+          stellar --version
+
+      - name: Configure stellar testnet
+        run: |
+          stellar network add testnet \
+            --rpc-url https://soroban-testnet.stellar.org \
+            --network-passphrase "Test SDF Network ; September 2015" || true
+
+      - name: Run gas benchmarks
+        env:
+          BENCH_NETWORK: testnet
+          BENCH_TAG: ${{ inputs.tag }}
+        run: |
+          chmod +x scripts/bench-gas/run-pq.sh \
+                   scripts/bench-gas/contracts/pq-sep-anarchy.sh
+          bash scripts/bench-gas/run-pq.sh
+
+      - name: Upload workflow artifacts (raw JSONL + rendered body)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: gas-benchmarks-pq-${{ inputs.tag }}
+          path: |
+            scripts/bench-gas/results-pq.md
+            scripts/bench-gas/results-pq.jsonl
+          if-no-files-found: error
+
+      - name: Set release body to bench output
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          body_path: scripts/bench-gas/results-pq.md
