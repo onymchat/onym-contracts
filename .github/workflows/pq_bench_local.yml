@@ -91,12 +91,19 @@ jobs:
 
       - name: Start local Stellar network
         env:
+          # `:future` tracks the latest protocol bump; `:testing`
+          # follows testnet and lagged by one protocol in run
+          # #25505338567, which surfaced as
+          #   "contract protocol number is newer than host", 26
+          # because pq/sep-anarchy reaches into Protocol 26's
+          # `env.crypto_hazmat().poseidon2_permutation`.
+          #
           # TODO: pin to a digest (`@sha256:...`) once a known-good
-          # quickstart image is captured. The `:testing` tag tracks
-          # the dev branch and may shift CPU instruction counts
-          # between runs — pinning a digest is the next step before
-          # using this workflow as a regression gate.
-          QUICKSTART_IMAGE: 'stellar/quickstart:testing'
+          # quickstart image is captured. The `:future` tag still
+          # shifts as Stellar lands new protocol features, so
+          # absolute CPU counts may drift between runs — pin a
+          # digest before using this workflow as a regression gate.
+          QUICKSTART_IMAGE: 'stellar/quickstart:future'
         run: |
           set -euo pipefail
           # `--local` boots a fresh standalone network; `--enable-soroban-rpc`
