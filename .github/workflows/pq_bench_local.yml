@@ -108,11 +108,22 @@ jobs:
           set -euo pipefail
           # `--local` boots a fresh standalone network; `--enable-soroban-rpc`
           # exposes soroban-rpc at /rpc. Friendbot is bundled at /friendbot.
+          #
+          # `--limits unlimited` lifts the per-tx CPU budget so the
+          # bench can capture the actual instruction count for FRI
+          # ops. Without it, run #25505702335 hit
+          #   Error(Budget, ExceededLimit)
+          # on `create_group` (~282M instructions vs the 100M
+          # testnet/mainnet cap), and every downstream op then failed
+          # with `GroupNotFound`. The point of this workflow is to
+          # MEASURE the CPU cost, not to enforce the cap — the
+          # renderer's `% of cap` column shows the headroom against
+          # the 100M ceiling regardless of what the local node enforces.
           docker run -d \
             --name stellar-local \
             -p 8000:8000 \
             "$QUICKSTART_IMAGE" \
-            --local --enable-soroban-rpc
+            --local --enable-soroban-rpc --limits unlimited
 
           # Probe BOTH stellar-rpc's `getHealth` AND nginx-proxied
           # friendbot. RPC alone isn't enough: in run #25505142449
