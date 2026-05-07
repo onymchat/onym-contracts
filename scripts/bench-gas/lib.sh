@@ -170,21 +170,34 @@ bench_gen_pq_update_proof() {
 # ---------- invocation + fee capture ----------
 
 # capture_tx_hashes <stderr_logfile>
-# Echoes every successfully-submitted transaction hash the stellar
-# CLI logged, one per line, in submission order. Anchored on the
-# stellar.expert URL line, which v26 prints only after the network
-# accepts the tx — so simulation-failed ops that never hit chain are
-# correctly skipped.
+# Echoes every transaction hash the stellar CLI logged, one per line,
+# in submission order.
+#
+# Two patterns matched, in fallback order:
+#   1. stellar.expert URL — printed only AFTER the network accepts a
+#      tx, so on testnet/public this filters out simulation-only
+#      failures cleanly.
+#   2. `Signing transaction: <hex>` — what the CLI prints on local,
+#      where there's no stellar.expert explorer. This line fires for
+#      both submitted and failed-to-submit txs (signing precedes
+#      submission), so on local we lose the testnet's
+#      "skip-failures" property — but `stellar tx fetch fee` returns
+#      empty for un-submitted hashes, so emit_row falls back to null
+#      fee fields, same outcome as not capturing.
 #
 # `stellar contract deploy` submits two txs (upload_contract_wasm +
 # create_contract); a normal invoke submits one. Callers pick by
 # index.
-#
-# v26 sample lines this matches (one per accepted tx):
-#   🔗 https://stellar.expert/explorer/testnet/tx/<64-hex>
 capture_tx_hashes() {
     local err="$1"
-    grep -oE 'stellar\.expert/explorer/[a-z]+/tx/[0-9a-f]{64}' "$err" \
+    local hashes
+    hashes="$(grep -oE 'stellar\.expert/explorer/[a-z]+/tx/[0-9a-f]{64}' "$err" \
+        | grep -oE '[0-9a-f]{64}')"
+    if [ -n "$hashes" ]; then
+        printf '%s\n' "$hashes"
+        return 0
+    fi
+    grep -oE 'Signing transaction: [0-9a-f]{64}' "$err" \
         | grep -oE '[0-9a-f]{64}'
 }
 
@@ -352,6 +365,67 @@ bench_deploy() {
     printf '%s' "$cid"
 }
 
+# simulate_cost <contract_id> <fn> <fn_args...>
+# Builds an unsigned tx envelope with the same args we're about to
+# submit, runs `stellar tx simulate` against it, and decodes the
+# returned `SorobanTransactionData` XDR to extract the host's
+# resource counters.
+#
+# Echoes a compact JSON object on stdout:
+#   {"cpu_insns": N, "read_bytes": N, "write_bytes": N}
+# `{}` on any failure (build, simulate, decode, parse). This is the
+# extra payload `bench_invoke` hands to `emit_row` so the JSONL row
+# carries the raw host counters alongside the post-submit fee data.
+#
+# We sim BEFORE submitting, not after, so state-mutating ops (e.g.
+# `create_group` writing the `UsedProof` nullifier) see the same
+# pre-state the on-chain run will. Sim adds one extra RPC roundtrip
+# per op — fine for a small bench, and the alternative (parsing
+# `--cost` stderr) doesn't expose CPU instructions in CLI v22+.
+simulate_cost() {
+    local cid="$1"
+    local fn="$2"
+    shift 2
+
+    local tx_xdr
+    tx_xdr="$(stellar contract invoke \
+        --config-dir "$BENCH_CONFIG_DIR" \
+        --network "$BENCH_NETWORK" \
+        --id "$cid" \
+        --source-account "$BENCH_DEPLOYER" \
+        --build-only \
+        -- "$fn" "$@" 2>/dev/null)" || { echo '{}'; return 0; }
+    [ -n "$tx_xdr" ] || { echo '{}'; return 0; }
+
+    # `stellar tx simulate` (v26) writes the assembled tx envelope
+    # (base64 XDR) to stdout — NOT a JSON-RPC `simulateTransaction`
+    # payload. The simulator's resource estimate is folded into the
+    # envelope at `Transaction.ext.v1.resources`.
+    local sim_xdr
+    sim_xdr="$(printf '%s\n' "$tx_xdr" | stellar tx simulate \
+        --config-dir "$BENCH_CONFIG_DIR" \
+        --network "$BENCH_NETWORK" \
+        --source-account "$BENCH_DEPLOYER" \
+        2>/dev/null | tr -d '\n')" || { echo '{}'; return 0; }
+    [ -n "$sim_xdr" ] || { echo '{}'; return 0; }
+
+    local resources
+    resources="$(stellar xdr decode \
+        --type TransactionEnvelope \
+        --output json "$sim_xdr" 2>/dev/null \
+        | jq -c '.tx.tx.ext.v1.resources // {}')" || { echo '{}'; return 0; }
+    [ "$resources" = "{}" ] && { echo '{}'; return 0; }
+
+    # Field name is `disk_read_bytes` in the v1 SorobanResources XDR
+    # schema, not `read_bytes`. (`write_bytes` keeps the unprefixed
+    # name.) jq's `// null` keeps the row well-formed if a field is
+    # absent on a future schema bump.
+    jq -nc --argjson r "$resources" \
+        '{cpu_insns:   ($r.instructions    // null),
+          read_bytes:  ($r.disk_read_bytes // null),
+          write_bytes: ($r.write_bytes     // null)}'
+}
+
 # bench_invoke <contract_id> <op> <tier> <fn> <fn_args...>
 # Submits the call, captures tx hash, fetches fee, emits a JSONL row.
 # Uses --send=yes so we get a real fee_charged even on revert paths.
@@ -363,6 +437,13 @@ bench_invoke() {
     local tier="$3"
     local fn="$4"
     shift 4
+
+    # Capture host CPU instructions + I/O bytes from a pre-flight sim
+    # so the JSONL row records the raw counters (post-submit fee data
+    # alone doesn't expose them in CLI v22+). Empty `{}` on failure —
+    # `emit_row` merges it as-is.
+    local cost_extra
+    cost_extra="$(simulate_cost "$cid" "$fn" "$@")"
 
     local err
     err="$(mktemp)"
@@ -382,5 +463,5 @@ bench_invoke() {
     hash="$(capture_tx_hash "$err" || true)"
     rm -f "$err"
 
-    emit_row "$BENCH_CURRENT_CONTRACT" "$op" "$tier" "$hash"
+    emit_row "$BENCH_CURRENT_CONTRACT" "$op" "$tier" "$hash" "$cost_extra"
 }

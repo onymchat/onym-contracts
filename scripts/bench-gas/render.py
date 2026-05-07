@@ -45,6 +45,11 @@ NETWORK_TO_EXPERT = {
     "mainnet": "https://stellar.expert/explorer/public",
 }
 
+# Per-tx CPU instruction cap (Protocol 22+, testnet + mainnet).
+# Lives on-chain as `ConfigSettingContractComputeV0.tx_max_instructions`
+# — bump if Stellar raises the cap.
+TX_MAX_INSTRUCTIONS = 100_000_000
+
 
 def stroops_to_xlm(stroops: int | None) -> str:
     if stroops is None:
@@ -62,6 +67,12 @@ def fmt_int(value: int | None) -> str:
     if value is None:
         return "—"
     return f"{int(value):,}"
+
+
+def fmt_pct_cap(insns: int | None) -> str:
+    if insns is None:
+        return "—"
+    return f"{int(insns) / TX_MAX_INSTRUCTIONS * 100:.2f}%"
 
 
 def tier_str(t: str) -> str:
@@ -150,18 +161,22 @@ def build_gas_table(op_rows: list[dict]) -> str:
     # `Resource` (charged up-front, refunded if unused — but already
     # netted out in the headline `Stroops`).
     headers = ["Contract", "Operation", "Tier", "Fee (XLM)",
-               "Stroops", "Resource", "Non-refundable", "Refundable", "Inclusion"]
+               "Stroops", "CPU Insns", "% of cap",
+               "Resource", "Non-refundable", "Refundable", "Inclusion"]
     lines = [
         "| " + " | ".join(headers) + " |",
         "|" + "|".join("---" for _ in headers) + "|",
     ]
     for row in sorted(op_rows, key=sort_op):
+        cpu_insns = row.get("cpu_insns")
         cells = [
             f"`{row.get('contract', '?')}`",
             f"`{row.get('op', '?')}`",
             tier_str(row.get("tier", "")),
             stroops_to_xlm(row.get("fee_stroops")),
             fmt_stroops(row.get("fee_stroops")),
+            fmt_int(cpu_insns),
+            fmt_pct_cap(cpu_insns),
             fmt_int(row.get("resource_fee")),
             fmt_int(row.get("non_refundable_resource_fee")),
             fmt_int(row.get("refundable_resource_fee")),
@@ -199,7 +214,13 @@ def detect_flavor(contract_rows: list[dict], op_rows: list[dict]) -> str:
 
 
 def notes_for_flavor(flavor: str) -> list[str]:
-    common = ["- Stroops are testnet stroops; 1 XLM = 10,000,000 stroops."]
+    common = [
+        "- Stroops are testnet stroops; 1 XLM = 10,000,000 stroops.",
+        f"- `CPU Insns` is the host instruction count from a pre-flight "
+        f"`simulateTransaction` (the value metered against "
+        f"`tx_max_instructions = {TX_MAX_INSTRUCTIONS:,}` on testnet/mainnet). "
+        "`% of cap` is `CPU Insns / tx_max_instructions`.",
+    ]
     if flavor == "pq":
         return common + [
             "- `create_group` / `verify_membership` / `update_commitment` rows "

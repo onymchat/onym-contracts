@@ -18,9 +18,20 @@ target
 .claude/
 .worktrees/
 
-# Standalone library-crate lockfile. Contract crates keep Cargo.lock
-# tracked for reproducible WASM builds; verifier is locked through them.
+# Standalone library-crate lockfiles. Contract crates keep Cargo.lock
+# tracked for reproducible WASM builds; verifier crates are locked
+# through them. Prover crates are off-chain bench-only binaries — not
+# release artefacts — so their lockfiles are not tracked either.
 plonk/verifier/Cargo.lock
+plonk/prover/Cargo.lock
+pq/verifier/Cargo.lock
+pq/prover/Cargo.lock
+
+# Stray `out/` directories from manual `stellar contract build
+# --out-dir out` runs. The bench scripts route their build output
+# into `mktemp -d`, but interactive runs occasionally leave one of
+# these alongside a contract crate.
+**/out/
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

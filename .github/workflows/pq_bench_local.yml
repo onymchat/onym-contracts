@@ -1,0 +1,210 @@
+name: PQ Bench (local)
+
+# Manual-dispatch CPU-instruction bench for the PQ flavor against a
+# self-hosted local Stellar network. Complements release_pq.yml's
+# testnet bench:
+#   * release_pq.yml runs at tag-time against testnet → produces
+#     canonical XLM/stroop fees for the release notes.
+#   * this workflow runs on demand against a local soroban-rpc →
+#     produces stable per-op CPU instruction counts (no friendbot
+#     rate-limits, no testnet protocol drift). Useful for catching
+#     algorithmic regressions in the FRI verifier between releases
+#     and for tracking how close FRI ops sit to the 100M
+#     `tx_max_instructions` cap as the verifier crate evolves.
+#
+# Local-vs-testnet caveats:
+#   * CPU instruction counts may diverge slightly between local and
+#     testnet when their host protocol versions differ. Pin both the
+#     stellar CLI (via STELLAR_VERSION) AND the quickstart image tag
+#     to keep numbers comparable across runs.
+#   * Storage rent / refundable-fee numbers WILL diverge from testnet
+#     (different ledger parameters). Don't use this workflow's fee
+#     numbers for the release body — that's release_pq.yml's job.
+#
+# Third-party `uses:` are pinned to commit SHA (with the version tag
+# in a trailing comment) so a tag-rewrite on those repos can't inject
+# code into bench runs — same posture as release_pq.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to bench (branch / tag / SHA). Defaults to the dispatch ref.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bench-gas-local:
+    name: bench-gas (local network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Same RUSTUP_TOOLCHAIN override as release_pq.yml: stellar-cli
+      # v26.0.0's contract-build wrapper rejects rustc 1.91.0, and the
+      # repo's rust-toolchain.toml files pin 1.92.0. Forcing `stable`
+      # here means CI uses whatever stable is on the runner regardless
+      # of those pins, keeping the contract build path resilient to
+      # toolchain bumps.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Rust build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: bench-gas-pq-local-rust-${{ hashFiles('pq/**/Cargo.toml') }}
+
+      - name: Install stellar CLI
+        env:
+          # Same pin as release_pq.yml. Bump in lockstep with that
+          # workflow so local and testnet runs stay byte-comparable
+          # at the CLI surface.
+          STELLAR_VERSION: '26.0.0'
+          STELLAR_SHA256: '31c83db342d1184b31f6591e739950eb45756be46dcd7bb57e4f38e91ea32e84'
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tarball="$tmp/stellar-cli.tar.gz"
+          curl -sSLf -o "$tarball" \
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_VERSION}/stellar-cli-${STELLAR_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${STELLAR_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xz -C "$tmp" -f "$tarball"
+          binary="$(find "$tmp" -maxdepth 3 -type f -name stellar -perm -u+x | head -1)"
+          test -n "$binary" || { echo "no stellar binary in tarball" >&2; exit 1; }
+          sudo install -m 0755 "$binary" /usr/local/bin/stellar
+          rm -rf "$tmp"
+          stellar --version
+
+      - name: Start local Stellar network
+        env:
+          # TODO: pin to a digest (`@sha256:...`) once a known-good
+          # quickstart image is captured. The `:testing` tag tracks
+          # the dev branch and may shift CPU instruction counts
+          # between runs — pinning a digest is the next step before
+          # using this workflow as a regression gate.
+          QUICKSTART_IMAGE: 'stellar/quickstart:testing'
+        run: |
+          set -euo pipefail
+          # `--local` boots a fresh standalone network; `--enable-soroban-rpc`
+          # exposes soroban-rpc at /rpc. Friendbot is bundled at /friendbot.
+          docker run -d \
+            --name stellar-local \
+            -p 8000:8000 \
+            "$QUICKSTART_IMAGE" \
+            --local --enable-soroban-rpc
+
+          # Wait for friendbot to respond — that signals core +
+          # soroban-rpc are both up. Bound at 90s; quickstart cold
+          # boot is typically 30-45s on ubuntu-latest.
+          for i in $(seq 1 45); do
+            if curl -sSf "http://localhost:8000/friendbot" -o /dev/null 2>&1 \
+               || curl -sS "http://localhost:8000/friendbot" 2>&1 | grep -q "invalid_field"; then
+              echo "stellar-local ready after ${i} polls"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "stellar-local did not become ready in 90s" >&2
+          docker logs stellar-local >&2 || true
+          exit 1
+
+      - name: Configure stellar CLI for local network
+        run: |
+          set -euo pipefail
+          stellar network add local \
+            --rpc-url http://localhost:8000/rpc \
+            --network-passphrase "Standalone Network ; February 2017"
+
+      - name: Generate + fund deployer key
+        env:
+          BENCH_DEPLOYER: bench-gas-pq-local-deployer
+        run: |
+          set -euo pipefail
+          stellar keys generate "$BENCH_DEPLOYER" --network local --overwrite
+          addr="$(stellar keys public-key "$BENCH_DEPLOYER")"
+          echo "deployer: $addr"
+          # Fund via the bundled friendbot. `stellar keys fund` may
+          # not auto-discover the friendbot URL on a custom local
+          # network, so call it directly — the response body is small
+          # JSON we don't need to parse.
+          curl -sSLf "http://localhost:8000/friendbot?addr=${addr}" >/dev/null
+          # Confirm by re-resolving the account; if friendbot didn't
+          # actually fund it, the bench's first invoke would fail
+          # downstream with a less-clear error.
+          stellar keys public-key "$BENCH_DEPLOYER" >/dev/null
+
+      - name: Run gas benchmarks
+        env:
+          BENCH_NETWORK: local
+          BENCH_DEPLOYER: bench-gas-pq-local-deployer
+        run: |
+          set -euo pipefail
+          chmod +x scripts/bench-gas/run-pq.sh \
+                   scripts/bench-gas/contracts/pq-sep-anarchy.sh
+          bash scripts/bench-gas/run-pq.sh
+
+      - name: Summarise CPU headroom
+        # Surfaces the per-op CPU instruction counts and how close
+        # they sit to the 100M `tx_max_instructions` cap. Currently
+        # informational only — the FRI verify ops sit ~2.8x above
+        # the cap at bench-scale parameters (log_n=6, num_layers=3,
+        # num_queries=8), so a hard fail on >100% would block every
+        # run. Once verifier optimisation work brings FRI ops under
+        # the cap, flip this step to `exit 1` on any row over a
+        # chosen threshold to gate regressions.
+        run: |
+          set -euo pipefail
+          echo "::group::Per-op CPU vs 100M cap"
+          jq -r '
+            select(.row_type == "op" and .cpu_insns)
+            | "\(.op)\t\(.cpu_insns)\t\((.cpu_insns / 100000000 * 100) | tostring | .[0:6])%"
+          ' scripts/bench-gas/results-pq.jsonl \
+            | column -t -s $'\t' -N "Op,CPU Insns,% of 100M cap"
+          echo "::endgroup::"
+
+          # Soft warning when any op exceeds the cap — emits a GH
+          # Actions ::warning:: line that surfaces in the workflow
+          # summary without failing the run.
+          over_cap="$(jq -r '
+            [select(.row_type == "op" and .cpu_insns and .cpu_insns > 100000000) | .op] | join(",")
+          ' scripts/bench-gas/results-pq.jsonl | tr -d '\n')"
+          if [ -n "$over_cap" ]; then
+            echo "::warning::CPU instructions exceed tx_max_instructions=100M for: $over_cap (these ops would be infeasible on testnet/mainnet at current bench parameters)"
+          fi
+
+      - name: Upload bench artefacts (JSONL + rendered body)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: pq-bench-local-${{ github.run_id }}
+          path: |
+            scripts/bench-gas/results-pq.md
+            scripts/bench-gas/results-pq.jsonl
+          if-no-files-found: error
+
+      - name: Stop local Stellar network
+        if: always()
+        run: |
+          docker logs stellar-local > stellar-local.log 2>&1 || true
+          docker rm -f stellar-local || true
+
+      - name: Upload local-network logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: stellar-local-logs-${{ github.run_id }}
+          path: stellar-local.log
+          if-no-files-found: ignore
