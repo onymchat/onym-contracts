@@ -51,6 +51,14 @@ NETWORK_TO_EXPERT = {
 # — bump if Stellar raises the cap.
 TX_MAX_INSTRUCTIONS = 100_000_000
 
+# Per-tx memory cap (40 MiB, Protocol 22+, testnet + mainnet). Memory
+# is enforced as a runtime host budget — not declared as a tx
+# resource — so values are only available post-submit (see
+# `fetch_metrics` in lib.sh, which pulls `core_metrics.mem_byte` from
+# `getTransaction.diagnosticEventsXdr`). Lives on-chain as
+# `ConfigSettingContractComputeV0.tx_memory_limit`.
+TX_MEMORY_LIMIT = 41_943_040
+
 
 def stroops_to_xlm(stroops: int | None) -> str:
     if stroops is None:
@@ -74,6 +82,12 @@ def fmt_pct_cap(insns: int | None) -> str:
     if insns is None:
         return "—"
     return f"{int(insns) / TX_MAX_INSTRUCTIONS * 100:.2f}%"
+
+
+def fmt_pct_mem_cap(mem_bytes: int | None) -> str:
+    if mem_bytes is None:
+        return "—"
+    return f"{int(mem_bytes) / TX_MEMORY_LIMIT * 100:.2f}%"
 
 
 def tier_str(t: str) -> str:
@@ -161,8 +175,14 @@ def build_gas_table(op_rows: list[dict]) -> str:
     # the locked portion of `Resource`; `Refundable` is the rest of
     # `Resource` (charged up-front, refunded if unused — but already
     # netted out in the headline `Stroops`).
+    #
+    # `Mem Bytes` + `% of mem cap` come from `lib.sh::fetch_metrics`
+    # (post-submit `core_metrics.mem_byte`). They are `—` for any row
+    # whose tx didn't reach `getTransaction` indexing (no hash, indexer
+    # miss, or pre-Protocol-23 RPCs that don't surface diagnostics).
     headers = ["Contract", "Operation", "Tier", "Fee (XLM)",
-               "Stroops", "CPU Insns", "% of cap",
+               "Stroops", "CPU Insns", "% of cpu cap",
+               "Mem Bytes", "% of mem cap",
                "Resource", "Non-refundable", "Refundable", "Inclusion"]
     lines = [
         "| " + " | ".join(headers) + " |",
@@ -170,6 +190,7 @@ def build_gas_table(op_rows: list[dict]) -> str:
     ]
     for row in sorted(op_rows, key=sort_op):
         cpu_insns = row.get("cpu_insns")
+        mem_bytes = row.get("mem_bytes")
         cells = [
             f"`{row.get('contract', '?')}`",
             f"`{row.get('op', '?')}`",
@@ -178,6 +199,8 @@ def build_gas_table(op_rows: list[dict]) -> str:
             fmt_stroops(row.get("fee_stroops")),
             fmt_int(cpu_insns),
             fmt_pct_cap(cpu_insns),
+            fmt_int(mem_bytes),
+            fmt_pct_mem_cap(mem_bytes),
             fmt_int(row.get("resource_fee")),
             fmt_int(row.get("non_refundable_resource_fee")),
             fmt_int(row.get("refundable_resource_fee")),
@@ -220,7 +243,14 @@ def notes_for_flavor(flavor: str) -> list[str]:
         f"- `CPU Insns` is the host instruction count from a pre-flight "
         f"`simulateTransaction` (the value metered against "
         f"`tx_max_instructions = {TX_MAX_INSTRUCTIONS:,}` on testnet/mainnet). "
-        "`% of cap` is `CPU Insns / tx_max_instructions`.",
+        "`% of cpu cap` is `CPU Insns / tx_max_instructions`.",
+        f"- `Mem Bytes` is the host memory burn from the post-submit "
+        f"`core_metrics.mem_byte` diagnostic event "
+        f"(metered against `tx_memory_limit = {TX_MEMORY_LIMIT:,}` / 40 MiB on "
+        "testnet/mainnet). It only appears on rows whose tx successfully submitted "
+        "and was indexed; ops that simulate-fail with `Error(Budget, ExceededLimit)` "
+        "show `—` because memory is enforced at runtime, not declared as a tx "
+        "resource — re-run on a local network with `--limits unlimited` to capture it.",
     ]
     if flavor == "pq":
         return common + [
