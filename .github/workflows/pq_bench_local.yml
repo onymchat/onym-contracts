@@ -213,31 +213,61 @@ jobs:
 
       - name: Summarise CPU headroom
         # Surfaces the per-op CPU instruction counts and how close
-        # they sit to the 100M `tx_max_instructions` cap. Currently
-        # informational only — the FRI verify ops sit ~2.8x above
-        # the cap at bench-scale parameters (log_n=6, num_layers=3,
-        # num_queries=8), so a hard fail on >100% would block every
-        # run. Once verifier optimisation work brings FRI ops under
-        # the cap, flip this step to `exit 1` on any row over a
-        # chosen threshold to gate regressions.
+        # they sit to the 400M `tx_max_instructions` cap (verified
+        # live against testnet + mainnet via getLedgerEntries on the
+        # `contract_compute_v0` ConfigSetting LedgerKey — see
+        # render.py for the re-verify recipe).
+        #
+        # At current bench parameters (log_n=6, num_layers=3,
+        # num_queries=8, blowup=2) FRI verify ops sit at ~70% of this
+        # cap — CPU is NOT the binding constraint on testnet/mainnet.
+        # The Summarise memory headroom step below flags the actual
+        # binding dimension (memory at ~60 MB / 143% of 40 MiB cap).
+        # Once verifier optimisation brings memory under cap, flip
+        # both soft warnings to `exit 1` to gate regressions.
         run: |
           set -euo pipefail
-          echo "::group::Per-op CPU vs 100M cap"
+          echo "::group::Per-op CPU vs 400M cap"
           jq -r '
             select(.row_type == "op" and .cpu_insns)
-            | "\(.op)\t\(.cpu_insns)\t\((.cpu_insns / 100000000 * 100) | tostring | .[0:6])%"
+            | "\(.op)\t\(.cpu_insns)\t\((.cpu_insns / 400000000 * 100) | tostring | .[0:6])%"
           ' scripts/bench-gas/results-pq.jsonl \
-            | column -t -s $'\t' -N "Op,CPU Insns,% of 100M cap"
+            | column -t -s $'\t' -N "Op,CPU Insns,% of 400M cap"
           echo "::endgroup::"
 
           # Soft warning when any op exceeds the cap — emits a GH
           # Actions ::warning:: line that surfaces in the workflow
           # summary without failing the run.
           over_cap="$(jq -r '
-            [select(.row_type == "op" and .cpu_insns and .cpu_insns > 100000000) | .op] | join(",")
+            [select(.row_type == "op" and .cpu_insns and .cpu_insns > 400000000) | .op] | join(",")
           ' scripts/bench-gas/results-pq.jsonl | tr -d '\n')"
           if [ -n "$over_cap" ]; then
-            echo "::warning::CPU instructions exceed tx_max_instructions=100M for: $over_cap (these ops would be infeasible on testnet/mainnet at current bench parameters)"
+            echo "::warning::CPU instructions exceed tx_max_instructions=400M for: $over_cap (these ops would be infeasible on testnet/mainnet at current bench parameters)"
+          fi
+
+      - name: Summarise memory headroom
+        # Same shape as the CPU step, against the 40 MiB
+        # `tx_memory_limit` cap. Memory only lands on rows whose tx
+        # successfully submitted (post-submit `core_metrics.mem_byte`
+        # from getTransaction.diagnosticEventsXdr — see
+        # lib.sh::fetch_metrics). The local network runs with
+        # `--limits unlimited` so even FRI ops submit and report
+        # their real memory burn here.
+        run: |
+          set -euo pipefail
+          echo "::group::Per-op memory vs 40 MiB cap"
+          jq -r '
+            select(.row_type == "op" and .mem_bytes)
+            | "\(.op)\t\(.mem_bytes)\t\((.mem_bytes / 41943040 * 100) | tostring | .[0:6])%"
+          ' scripts/bench-gas/results-pq.jsonl \
+            | column -t -s $'\t' -N "Op,Mem Bytes,% of 40 MiB cap"
+          echo "::endgroup::"
+
+          over_mem="$(jq -r '
+            [select(.row_type == "op" and .mem_bytes and .mem_bytes > 41943040) | .op] | join(",")
+          ' scripts/bench-gas/results-pq.jsonl | tr -d '\n')"
+          if [ -n "$over_mem" ]; then
+            echo "::warning::Memory exceeds tx_memory_limit=40 MiB for: $over_mem (these ops would be infeasible on testnet/mainnet at current bench parameters)"
           fi
 
       - name: Upload bench artefacts (JSONL + rendered body)

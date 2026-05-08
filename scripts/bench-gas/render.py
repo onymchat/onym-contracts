@@ -46,17 +46,26 @@ NETWORK_TO_EXPERT = {
     "mainnet": "https://stellar.expert/explorer/public",
 }
 
-# Per-tx CPU instruction cap (Protocol 22+, testnet + mainnet).
-# Lives on-chain as `ConfigSettingContractComputeV0.tx_max_instructions`
-# — bump if Stellar raises the cap.
-TX_MAX_INSTRUCTIONS = 100_000_000
+# Per-tx CPU + memory caps as configured on testnet + mainnet (live
+# values fetched via JSON-RPC `getLedgerEntries` against the
+# `contract_compute_v0` ConfigSetting LedgerKey). Update if Stellar
+# raises either cap — to re-verify, run:
+#
+#   key=$(echo '{"config_setting":{"config_setting_id":"contract_compute_v0"}}' \
+#         | stellar xdr encode --type LedgerKey --input json)
+#   curl -sS -X POST -H 'Content-Type: application/json' \
+#       -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getLedgerEntries\",
+#            \"params\":{\"keys\":[\"$key\"]}}" \
+#       https://soroban-testnet.stellar.org \
+#     | jq -r '.result.entries[0].xdr' \
+#     | xargs -I {} stellar xdr decode --type LedgerEntryData --output json {} \
+#     | jq '.config_setting.contract_compute_v0'
+TX_MAX_INSTRUCTIONS = 400_000_000
 
-# Per-tx memory cap (40 MiB, Protocol 22+, testnet + mainnet). Memory
-# is enforced as a runtime host budget — not declared as a tx
+# Memory is enforced as a runtime host budget — not declared as a tx
 # resource — so values are only available post-submit (see
 # `fetch_metrics` in lib.sh, which pulls `core_metrics.mem_byte` from
-# `getTransaction.diagnosticEventsXdr`). Lives on-chain as
-# `ConfigSettingContractComputeV0.tx_memory_limit`.
+# `getTransaction.diagnosticEventsXdr`).
 TX_MEMORY_LIMIT = 41_943_040
 
 
