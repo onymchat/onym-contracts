@@ -301,6 +301,18 @@ emit_row() {
             raw='{}'
         fi
     fi
+
+    # Post-submit host-budget metrics — the only path on Protocol 23+
+    # that exposes `mem_bytes`. Same indexer-race tolerance as fees:
+    # the fee retry above usually warms the cache by the time we get
+    # here, but we still validate + accept `{}` on miss so a metrics
+    # gap doesn't kill the row.
+    local metrics
+    metrics="$(fetch_metrics "$hash" 2>/dev/null || echo '{}')"
+    if ! printf '%s' "$metrics" | jq -e . >/dev/null 2>&1; then
+        metrics='{}'
+    fi
+
     # `stellar tx fetch fee --output json` returns
     #   { "proposed": {fee, resource_fee, inclusion_fee},
     #     "charged":  {fee, resource_fee, inclusion_fee,
@@ -309,6 +321,11 @@ emit_row() {
     # what we surface as the headline `fee_stroops`. `proposed` is what
     # the simulator pre-allocated — useful diagnostic, kept under
     # `proposed_fee` for the renderer.
+    #
+    # Merge order `... + $extra + $metrics` puts post-submit metrics
+    # last so they win on key conflicts (today only `mem_bytes`, but
+    # leaves room for future post-submit fields without breaking
+    # callers that already populate something via `simulate_cost`).
     jq -nc \
         --arg row_type "op" \
         --arg contract "$contract" \
@@ -317,6 +334,7 @@ emit_row() {
         --arg hash "$hash" \
         --argjson raw "$raw" \
         --argjson extra "$extra" \
+        --argjson metrics "$metrics" \
         '{row_type: $row_type, contract: $contract, op: $op, tier: $tier, hash: $hash,
           fee_stroops: $raw.charged.fee,
           inclusion_fee: $raw.charged.inclusion_fee,
@@ -324,7 +342,7 @@ emit_row() {
           non_refundable_resource_fee: $raw.charged.non_refundable_resource_fee,
           refundable_resource_fee: $raw.charged.refundable_resource_fee,
           proposed_fee: $raw.proposed.fee,
-          raw: $raw} + $extra' \
+          raw: $raw} + $extra + $metrics' \
         >> "$BENCH_JSONL"
 }
 
@@ -365,27 +383,72 @@ bench_deploy() {
     printf '%s' "$cid"
 }
 
-# simulate_cost <contract_id> <fn> <fn_args...>
-# Builds an unsigned tx envelope with the same args we're about to
-# submit, runs `stellar tx simulate` against it, and decodes the
-# returned `SorobanTransactionData` XDR to extract the host's
-# resource counters.
+# ---------- pre-flight simulation + post-submit metrics ----------
 #
-# Echoes a compact JSON object on stdout:
-#   {"cpu_insns": N, "read_bytes": N, "write_bytes": N}
-# `{}` on any failure (build, simulate, decode, parse). This is the
-# extra payload `bench_invoke` hands to `emit_row` so the JSONL row
-# carries the raw host counters alongside the post-submit fee data.
+# `simulate_cost` posts `simulateTransaction` directly to soroban-rpc
+# via `rpc_simulate`. We hit the JSON-RPC endpoint instead of shelling
+# out to `stellar tx simulate` because the response carries
+# `transactionData` (a base64 SorobanTransactionData), which we decode
+# to pull the simulator's declared CPU + IO byte counters from
+# `resources` — exactly the counters the renderer surfaces.
 #
-# We sim BEFORE submitting, not after, so state-mutating ops (e.g.
+# `fetch_metrics` posts `getTransaction` for a submitted tx and
+# decodes its `diagnosticEventsXdr` to pull `core_metrics.mem_byte`,
+# the only path that exposes memory burn on Protocol 23+. Memory is
+# enforced as a runtime host budget — not declared as a tx-level
+# resource — so it never appears in `transactionData.resources`, and
+# soroban-rpc removed the legacy `result.cost.memBytes` field.
+#
+# Why pre-flight sim, not post-mortem: state-mutating ops (e.g.
 # `create_group` writing the `UsedProof` nullifier) see the same
-# pre-state the on-chain run will. Sim adds one extra RPC roundtrip
-# per op — fine for a small bench, and the alternative (parsing
-# `--cost` stderr) doesn't expose CPU instructions in CLI v22+.
-simulate_cost() {
+# pre-state the on-chain run will see only if we sim BEFORE
+# submitting. The roundtrip cost is fine for a small bench.
+
+# bench_rpc_url
+# Echoes the soroban-rpc URL for $BENCH_NETWORK. Reads from the stellar
+# CLI network config (toml at $BENCH_CONFIG_DIR/network/<name>.toml).
+# Falls back to a $BENCH_RPC_URL override, then to network-name
+# defaults. Empty when unresolvable.
+bench_rpc_url() {
+    if [ -n "${BENCH_RPC_URL:-}" ]; then
+        printf '%s' "$BENCH_RPC_URL"
+        return 0
+    fi
+    local cfg="${BENCH_CONFIG_DIR:-}/network/${BENCH_NETWORK:-}.toml"
+    if [ -f "$cfg" ]; then
+        local url
+        url="$(grep -E '^[[:space:]]*rpc[_-]?url' "$cfg" \
+            | head -1 \
+            | sed -E 's/.*"([^"]*)".*/\1/')"
+        if [ -n "$url" ]; then
+            printf '%s' "$url"
+            return 0
+        fi
+    fi
+    case "${BENCH_NETWORK:-}" in
+        testnet) printf '%s' 'https://soroban-testnet.stellar.org' ;;
+        mainnet) printf '%s' 'https://soroban.stellar.org' ;;
+        local)   printf '%s' 'http://localhost:8000/rpc' ;;
+        *)       printf '%s' '' ;;
+    esac
+}
+
+# rpc_simulate <contract_id> <fn> <fn_args...>
+# Builds an unsigned tx envelope (`stellar contract invoke
+# --build-only`) and POSTs it to soroban-rpc's `simulateTransaction`
+# JSON-RPC endpoint. Echoes the raw JSON response on stdout, empty on
+# any failure path. `simulate_cost` decodes `result.transactionData`
+# (base64 SorobanTransactionData XDR) for CPU + IO byte counters.
+rpc_simulate() {
+    command -v curl >/dev/null 2>&1 || return 0
+
     local cid="$1"
     local fn="$2"
     shift 2
+
+    local url
+    url="$(bench_rpc_url)"
+    [ -n "$url" ] || return 0
 
     local tx_xdr
     tx_xdr="$(stellar contract invoke \
@@ -394,36 +457,131 @@ simulate_cost() {
         --id "$cid" \
         --source-account "$BENCH_DEPLOYER" \
         --build-only \
-        -- "$fn" "$@" 2>/dev/null)" || { echo '{}'; return 0; }
-    [ -n "$tx_xdr" ] || { echo '{}'; return 0; }
+        -- "$fn" "$@" 2>/dev/null)" || return 0
+    [ -n "$tx_xdr" ] || return 0
 
-    # `stellar tx simulate` (v26) writes the assembled tx envelope
-    # (base64 XDR) to stdout — NOT a JSON-RPC `simulateTransaction`
-    # payload. The simulator's resource estimate is folded into the
-    # envelope at `Transaction.ext.v1.resources`.
-    local sim_xdr
-    sim_xdr="$(printf '%s\n' "$tx_xdr" | stellar tx simulate \
-        --config-dir "$BENCH_CONFIG_DIR" \
-        --network "$BENCH_NETWORK" \
-        --source-account "$BENCH_DEPLOYER" \
-        2>/dev/null | tr -d '\n')" || { echo '{}'; return 0; }
-    [ -n "$sim_xdr" ] || { echo '{}'; return 0; }
+    local payload
+    payload="$(jq -nc --arg tx "$tx_xdr" \
+        '{jsonrpc:"2.0",id:1,method:"simulateTransaction",params:{transaction:$tx}}')"
+
+    local resp
+    resp="$(curl -sS -X POST -H 'Content-Type: application/json' \
+        --max-time 20 \
+        -d "$payload" "$url" 2>/dev/null)" || return 0
+    [ -n "$resp" ] || return 0
+    printf '%s' "$resp" | jq -e . >/dev/null 2>&1 || return 0
+    printf '%s' "$resp"
+}
+
+# simulate_cost <contract_id> <fn> <fn_args...>
+# Echoes a compact JSON object on stdout for `emit_row`'s extras:
+#   {"cpu_insns": N, "read_bytes": N, "write_bytes": N}
+# `{}` on any failure. Pulls all three from `result.transactionData`
+# (a base64-encoded SorobanTransactionData XDR; `resources` block
+# carries the simulator's declared budget for the tx).
+#
+# What's NOT here: `mem_bytes`. Soroban-rpc removed `result.cost`
+# entirely on Protocol 23+, and memory has never been a tx-declared
+# resource — only a runtime host budget. The only path that exposes
+# memory is the post-submit `core_metrics_event` diagnostic event on
+# a real execution; `fetch_metrics` (called from `emit_row`) handles
+# that.
+simulate_cost() {
+    local cid="$1"
+    local fn="$2"
+    shift 2
+
+    local resp
+    resp="$(rpc_simulate "$cid" "$fn" "$@")"
+    [ -n "$resp" ] || { echo '{}'; return 0; }
+
+    # `transactionData` is the base64-encoded SorobanTransactionData
+    # XDR (NOT a TransactionEnvelope). Its `resources` block carries
+    # `instructions` (the declared CPU budget), `disk_read_bytes`,
+    # and `write_bytes`. On budget failures `transactionData` may be
+    # absent; treat decode failure as "no data" and emit `{}`.
+    local td_b64
+    td_b64="$(printf '%s' "$resp" | jq -r '.result.transactionData // empty')"
+    [ -n "$td_b64" ] || { echo '{}'; return 0; }
 
     local resources
     resources="$(stellar xdr decode \
-        --type TransactionEnvelope \
-        --output json "$sim_xdr" 2>/dev/null \
-        | jq -c '.tx.tx.ext.v1.resources // {}')" || { echo '{}'; return 0; }
-    [ "$resources" = "{}" ] && { echo '{}'; return 0; }
+        --type SorobanTransactionData \
+        --output json "$td_b64" 2>/dev/null \
+        | jq -c '.resources // {}')" || { echo '{}'; return 0; }
+    [ -z "$resources" ] || [ "$resources" = "{}" ] && { echo '{}'; return 0; }
 
     # Field name is `disk_read_bytes` in the v1 SorobanResources XDR
-    # schema, not `read_bytes`. (`write_bytes` keeps the unprefixed
-    # name.) jq's `// null` keeps the row well-formed if a field is
-    # absent on a future schema bump.
-    jq -nc --argjson r "$resources" \
-        '{cpu_insns:   ($r.instructions    // null),
-          read_bytes:  ($r.disk_read_bytes // null),
-          write_bytes: ($r.write_bytes     // null)}'
+    # (write_bytes keeps the unprefixed name). `// null` keeps the row
+    # well-formed under future schema bumps.
+    jq -nc --argjson r "$resources" '
+        {
+          cpu_insns:   ($r.instructions     // null),
+          read_bytes:  ($r.disk_read_bytes  // null),
+          write_bytes: ($r.write_bytes      // null)
+        }'
+}
+
+# fetch_metrics <hash>
+# Calls `getTransaction` for a submitted tx and decodes
+# `diagnosticEventsXdr` to extract host runtime budget burn from
+# `core_metrics` events. Echoes JSON `{"mem_bytes": N}` on success,
+# `{}` on miss. This is the ONLY path that exposes `mem_bytes` on
+# Protocol 23+ — `simulateTransaction.result.cost` is gone, and
+# memory is enforced as a runtime host budget (not a declared tx
+# resource), so it surfaces only after a real execution.
+#
+# We don't touch `cpu_insns` here — `simulate_cost`'s pre-submit
+# value (from `transactionData.resources.instructions`) is the
+# simulator's declared CPU budget and is what the renderer uses for
+# the `% of cap` headroom column. The post-submit `core_metrics.cpu_insn`
+# is the actual burn (typically 5–10% lower); we leave that to a
+# future schema bump if useful.
+fetch_metrics() {
+    local hash="$1"
+    [ -n "$hash" ] || { echo '{}'; return 0; }
+
+    command -v curl >/dev/null 2>&1 || { echo '{}'; return 0; }
+
+    local url
+    url="$(bench_rpc_url)"
+    [ -n "$url" ] || { echo '{}'; return 0; }
+
+    local payload resp
+    payload="$(jq -nc --arg h "$hash" \
+        '{jsonrpc:"2.0",id:1,method:"getTransaction",params:{hash:$h}}')"
+    resp="$(curl -sS -X POST -H 'Content-Type: application/json' --max-time 20 \
+        -d "$payload" "$url" 2>/dev/null)" || { echo '{}'; return 0; }
+    [ -n "$resp" ] || { echo '{}'; return 0; }
+    printf '%s' "$resp" | jq -e . >/dev/null 2>&1 || { echo '{}'; return 0; }
+
+    # Walk diagnosticEventsXdr; each entry is a base64 DiagnosticEvent.
+    # core_metrics events have shape:
+    #   topics = ["core_metrics", <metric_name>], data.u64 = <value>
+    # We only surface mem_byte today; extending to other metrics is
+    # a one-line change (add a case to the inner case statement).
+    local mem_byte=
+    while IFS= read -r ev_b64; do
+        [ -z "$ev_b64" ] && continue
+        local pair
+        pair="$(stellar xdr decode --type DiagnosticEvent --output json "$ev_b64" 2>/dev/null \
+            | jq -r '
+                .event.body.v0 as $b |
+                if ($b.topics // [] | length >= 2)
+                   and (($b.topics[0].symbol // "") == "core_metrics")
+                then "\($b.topics[1].symbol)=\($b.data.u64 // $b.data.u32 // "")"
+                else empty end
+              ')" || continue
+        case "$pair" in
+            mem_byte=*) mem_byte="${pair#mem_byte=}" ;;
+        esac
+    done < <(printf '%s' "$resp" | jq -r '.result.diagnosticEventsXdr[]? // empty')
+
+    if [ -n "$mem_byte" ]; then
+        jq -nc --arg m "$mem_byte" '{mem_bytes: ($m | tonumber)}'
+    else
+        echo '{}'
+    fi
 }
 
 # bench_invoke <contract_id> <op> <tier> <fn> <fn_args...>

@@ -38,6 +38,10 @@ require_cmd cargo
 require_cmd stellar
 require_cmd jq
 require_cmd xxd
+# curl: used by lib.sh's rpc_simulate (POST simulateTransaction for
+# pre-submit CPU + IO bytes) and fetch_metrics (POST getTransaction
+# for post-submit mem_bytes from core_metrics events).
+require_cmd curl
 
 echo "==> bench config (PQ)"
 echo "    network:      $BENCH_NETWORK"
