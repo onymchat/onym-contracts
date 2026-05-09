@@ -302,3 +302,43 @@ jobs:
           set -euo pipefail
           gh release upload "$TAG" contracts-manifest.json#contracts-manifest.json --clobber
           gh release edit "$TAG" --latest
+
+      - name: Notify onym-relayer to refresh allowlist
+        # The droplet pulls
+        # `releases/latest/download/contracts-manifest.json` itself on a
+        # 15-min timer, so this poke is just a "go now" — skipping it
+        # only delays the new contracts becoming relayable, never breaks
+        # them. We mark this `continue-on-error` so a relayer outage
+        # cannot fail an otherwise-clean contracts release.
+        #
+        # The URL and bearer token are configured in this repo's
+        # settings; if either is missing the step no-ops with a warning.
+        # Bearer token must be one of the values in the relayer's
+        # `RELAYER_AUTH_TOKENS`.
+        if: always()
+        continue-on-error: true
+        env:
+          RELAYER_REFRESH_URL: ${{ vars.RELAYER_REFRESH_URL }}
+          RELAYER_REFRESH_TOKEN: ${{ secrets.RELAYER_REFRESH_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${RELAYER_REFRESH_URL:-}" ] || [ -z "${RELAYER_REFRESH_TOKEN:-}" ]; then
+            echo "::warning::RELAYER_REFRESH_URL or RELAYER_REFRESH_TOKEN unset — skipping relayer refresh poke"
+            exit 0
+          fi
+          echo "==> POST $RELAYER_REFRESH_URL"
+          # Capture HTTP status separately so we can fail the step on a
+          # non-2xx without losing the response body in logs.
+          http_code="$(curl -sS -o /tmp/refresh-body -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer $RELAYER_REFRESH_TOKEN" \
+            -H 'Content-Length: 0' \
+            --max-time 30 \
+            "$RELAYER_REFRESH_URL" || echo 000)"
+          echo "HTTP $http_code"
+          cat /tmp/refresh-body 2>/dev/null || true
+          echo
+          case "$http_code" in
+            2*) echo "relayer refresh ok" ;;
+            *)  echo "::warning::relayer refresh returned HTTP $http_code"; exit 1 ;;
+          esac
