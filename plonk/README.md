@@ -106,9 +106,13 @@ wire it all together.
 | democracy     | `create_group`           | 0, 1          | 10,000 per tier ~ 20,000 total     | `GroupCount(tier)`; tier 2 rejected     |
 | oneonone      | `create_group`           | none (d=5)    | 10,000 total                       | `GroupCount` (no tier dimension)        |
 
-Source constants: `MAX_GROUPS_PER_TIER = 10_000` in sep-anarchy,
-sep-democracy, sep-oligarchy, sep-tyranny; `MAX_GROUPS = 10_000` in
-sep-oneonone. `MAX_DEMOCRACY_QUORUM_TIER = 1` gates tier 2 in democracy.
+### Source constants / code paths
+
+- `MAX_GROUPS_PER_TIER = 10_000` in sep-anarchy, sep-democracy, sep-oligarchy, sep-tyranny.
+- `MAX_GROUPS = 10_000` in sep-oneonone.
+- `MAX_DEMOCRACY_QUORUM_TIER = 1` gates tier 2 create/update in sep-democracy.
+- `LEDGER_THRESHOLD = 17_280`, `LEDGER_BUMP = 518_400` across all five contract types.
+- `HISTORY_WINDOW = 64` for history-bearing contracts (anarchy, tyranny, oligarchy, democracy).
 
 ### Tier shape / member capacity
 
@@ -125,7 +129,8 @@ All TTL values are in ledgers; at a nominal 5-second ledger cadence
 the threshold is ~1 day and the bump is ~30 days.
 
 `LEDGER_THRESHOLD = 17_280`, `LEDGER_BUMP = 518_400` across all five
-contract types.
+contract types. `HISTORY_WINDOW = 64` entries retained per group for
+history-bearing contract types (anarchy, tyranny, oligarchy, democracy).
 
 | Storage item                  | TTL threshold | TTL bump    | Approx wall-clock at 5 s ledgers       | Refreshed by                                                              |
 |-------------------------------|---------------|-------------|----------------------------------------|---------------------------------------------------------------------------|
@@ -133,9 +138,6 @@ contract types.
 | Group history                 | 17,280        | 518,400     | threshold ~1 day, bump ~30 days        | `create_group`, `update_commitment`, `bump_group_ttl` (history-bearing types) |
 | Tyranny admin commitment      | 17,280        | 518,400     | threshold ~1 day, bump ~30 days        | `create_group`, `update_commitment`, `bump_group_ttl`                     |
 | Used-proof nullifier          | 17,280        | 518,400     | threshold ~1 day, bump ~30 days        | Successful state-changing proof recording only                            |
-
-`HISTORY_WINDOW = 64` entries retained per group for history-bearing
-contract types (anarchy, tyranny, oligarchy, democracy).
 
 ### Monotonic capacity - important caveat
 
@@ -147,11 +149,14 @@ created by this contract instance*, not *reusable live slots*.
 
 A contract instance can become unable to create new groups even after
 old group storage has expired, because the counter remains at its
-maximum. Decide whether this is intended protocol policy or an
-implementation artifact before wiring the relayer allowlist. If the
-behaviour is intentional, document it in the public relayer docs; if
-not, design an explicit cleanup/reclaim mechanism rather than relying
-on TTL expiration alone.
+maximum.
+
+### Suggested follow-up
+
+Decide whether the monotonic capacity behavior is intended protocol
+policy or just an implementation artifact. If intended, document it in
+the public contract/relayer docs. If not intended, design an explicit
+cleanup/reclaim mechanism rather than relying on TTL expiration alone.
 
 ## Drift control
 
