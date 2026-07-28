@@ -10,9 +10,9 @@
 //! |---------------------------------|-------------------------------------------|
 //! | `proof_format`                  | `circuit::plonk::proof_format`            |
 //! | `vk_format`                     | `circuit::plonk::vk_format`               |
-//! | (forthcoming) `transcript`      | `circuit::plonk::transcript`              |
-//! | (forthcoming) `verifier_*`      | `circuit::plonk::verifier_*`              |
-//! | (forthcoming) `verifier`        | `circuit::plonk::verifier`                |
+//! | `transcript`                    | `circuit::plonk::transcript`              |
+//! | `verifier_*`                    | `circuit::plonk::verifier_*`              |
+//! | `verifier`                      | `circuit::plonk::verifier`                |
 //!
 //! Each contract (`sep-anarchy`, `sep-democracy`, `sep-oligarchy`,
 //! `sep-oneonone`, `sep-tyranny`) imports this crate, embeds its baked

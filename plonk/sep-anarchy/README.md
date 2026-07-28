@@ -1,10 +1,16 @@
 # sep-anarchy
 
-Per-type **single-signer** membership group on Soroban — no admin, no quorum,
-no occupancy hiding. A member proves "I know a secret key behind a leaf in
-the group's tree" via a TurboPlonk membership proof; that single proof is
-sufficient authorization to *both* read state (`verify_membership`) and to
-advance the group epoch (`update_commitment`).
+Per-type **single-signer** membership group on Soroban — no group admin, no
+quorum, no occupancy hiding. A member proves "I know a secret key behind a
+leaf in the group's tree" via a TurboPlonk membership proof; that single
+proof is sufficient authorization to *both* read state (`verify_membership`)
+and to advance the group epoch (`update_commitment`).
+
+The contract does store a deployment-time **operator admin** (constructor
+argument) whose only capability is `set_restricted_mode`: when restricted
+mode is on, `create_group` is operator-only. The operator has no power over
+existing groups — no group's state can be advanced, frozen, or modified by
+the operator. See the Notes section.
 
 ```
                   SEP-ANARCHY  —  sk → π flow
@@ -67,7 +73,8 @@ advance the group epoch (`update_commitment`).
    │   2 scalars             │       │   3 scalars                  │
    │                         │       │                              │
    │   • caller.require_auth │       │   • NO require_auth          │
-   │   • tier ≤ 2            │       │     (proof IS the auth)      │
+   │   • restricted? ⇒ admin │       │     (proof IS the auth)      │
+   │   • tier ≤ 2            │       │                              │
    │   • canonical Fr(comm)  │       │   • c_old == state.commitment│
    │   • PI[0] == comm arg   │       │   • ep_old == BE(state.epoch)│
    │   • PI[1] == BE(0)      │       │   • canonical Fr(c_new)      │
@@ -181,6 +188,18 @@ advance the group epoch (`update_commitment`).
 
 ## Notes
 
+- **Operator admin & restricted mode.** `__constructor(env, admin)` pins a
+  deployment-time operator. `set_restricted_mode(true)` (operator-only,
+  emits `RestrictedModeChanged`) gates `create_group` behind the operator
+  (`Error::AdminOnly` otherwise). This is a creation-throttling switch for
+  the deployment, not a group role: the operator cannot advance, freeze,
+  or modify any existing group's state, and there is no admin-rotation
+  entrypoint. Storage keys: `DataKey::Admin`, `DataKey::RestrictedMode`.
+- **Groups never deactivate today.** `CommitmentEntry.active` is written
+  `true` at create and update and no entrypoint sets it `false`; the
+  `state.active` gate on `update_commitment` and the `GroupInactive` /
+  `GroupStillActive` errors are future-proofing for a deactivation flow
+  that does not exist yet.
 - **`commitment` is not the Merkle root.** The on-chain commitment hides
   both the root *and* the per-state salt behind two Poseidon levels. Two
   groups with the same membership at the same epoch but different salts

@@ -11,19 +11,25 @@ without branching on the underlying SNARK.
 
   contract        members  admins   who can advance state?    auth shape
   ───────────     ───────  ───────  ──────────────────────    ───────────
-  sep-anarchy     ≤ 2¹¹    none     any group member          1 membership π
-  sep-oneonone    exactly  none     nobody — immutable        (no update)
+  sep-anarchy     ≤ 2¹¹    none*    any group member          1 membership π
+  sep-oneonone    exactly  none*    nobody — immutable        (no update)
                   2
-  sep-democracy   ≤ 2¹¹    no       K-of-N admin quorum,      K admin πs
-                           separate hidden member counts;     batched in 1 π
-                           tier     count delta only
-  sep-oligarchy   ≤ 2¹¹    ≤ 32     K-of-N admin quorum,      K admin πs
-                                    hidden member + admin     batched in 1 π
-                                    counts; admin tree
-                                    fully hidden post-create
+  sep-democracy   ≤ 2¹¹    no       K-of-N member quorum,     K member πs
+                           separate hidden member count;      batched in 1 π
+                           tier*    count delta only
+  sep-oligarchy   ≤ 2¹¹    ≤ 32*    K-of-N admin quorum,      K admin πs
+                                    hidden member count;      batched in 1 π
+                                    admin tree fully
+                                    hidden post-create
   sep-tyranny     ≤ 2¹¹    1        single pinned admin       single admin π
-                           (fixed)  with cross-group
+                           (fixed)* with cross-group
                                     unlinkability
+
+  * every contract additionally stores a deployment-time OPERATOR
+    admin (constructor arg) whose only power is set_restricted_mode —
+    gating group creation to the operator. It can never advance or
+    modify existing group state. Member/admin caps are enforced by
+    circuit depth in the baked VKs, not by an on-chain counter.
 ```
 
 ```
@@ -33,12 +39,17 @@ without branching on the underlying SNARK.
   Each flavor is an independent Soroban contract suite — different
   addresses on-chain, different proof shapes, different VK bytes.
   Group state does NOT migrate across flavors; flavor is a deployment-
-  time choice. The `traits/` crate keeps the public Soroban call shape
-  uniform so clients don't branch on it.
+  time choice. The post-create call shape (update_commitment,
+  verify_membership, bump_group_ttl, set_restricted_mode) is kept
+  uniform across the plonk sep-* contracts by convention; creation
+  entrypoints differ per flavor, and pq takes `proof: Bytes` where
+  plonk takes `BytesN<1601>`. The `traits/` crate is an empty stub
+  reserved for extracting that shared shape — nothing depends on it
+  yet.
 
          ┌─────────────────────────────────────────────────┐
-         │   traits/    shared Error / DataKey /           │
-         │              entrypoint signatures              │
+         │   traits/    planned shared interface types     │
+         │              (empty stub today, no dependents)  │
          └────────────────────┬────────────────────────────┘
                               │
                     ┌─────────┴─────────┐
@@ -67,7 +78,7 @@ without branching on the underlying SNARK.
            │  │ (5)     │ │    │              │
            │  └─────────┘ │    │              │
            └──────────────┘    └──────────────┘
-              TODAY               PLANNED
+              TODAY             IN PROGRESS
 ```
 
 ```
@@ -130,8 +141,8 @@ without branching on the underlying SNARK.
   ├── README.md                    (this file)
   ├── LICENSE
   ├── traits/                      shared Soroban interface types
-  │   └── Cargo.toml               (placeholder; populated when PQ
-  │                                 flavor lands)
+  │   └── Cargo.toml               (empty stub; no crate depends
+  │                                 on it yet)
   ├── plonk/                       TurboPlonk + EF KZG flavor (today)
   │   ├── prover/                  off-chain TurboPlonk prover +
   │   │                             per-tier VK baker + canonical-
@@ -147,8 +158,10 @@ without branching on the underlying SNARK.
   │   ├── sep-tyranny/    + README + tests + test_snapshots/
   │   └── tests/fixtures/          baked VK + canonical proof + PI
   │                                 byte fixtures (committed)
-  ├── pq/                          (planned — Plonky3 + FRI; blocked
-  │                                 on FRI host functions)
+  ├── pq/                          Plonky3 + FRI flavor (prover,
+  │                                 verifier, sep-anarchy crates;
+  │                                 on-chain deploy blocked on FRI
+  │                                 host functions)
   ├── scripts/bench-gas/           testnet gas-cost bench driver
   │   ├── run.sh                   orchestrator
   │   ├── setup.sh                 identity, friendbot, builds
@@ -156,15 +169,19 @@ without branching on the underlying SNARK.
   │   ├── render.py                JSONL → markdown table
   │   └── contracts/sep-*.sh       per-contract drivers
   └── .github/workflows/
-      ├── release.yml              tag push → 5× source-attested
-      │                            build + bench-gas
+      ├── release.yml              manual workflow_dispatch → 5×
+      │                            home_domain-stamped build +
+      │                            bench-gas
       └── pr.yml                   per-flavor build+test on PRs
 ```
 
 ## Build
 
-Each contract is its own Cargo crate (`rust-toolchain.toml` pins 1.91.0,
-matching `soroban-sdk = "=26.0.0-rc.1"`). From a contract directory:
+Each contract is its own Cargo crate. The plonk contract crates pin
+rustc 1.91.0 with `soroban-sdk = "=26.0.0-rc.1"`; the pq crates pin
+1.95.0 with `soroban-sdk = "=26.0.0"`; the off-chain prover and the
+`sep-*-ffi` crates pin 1.88.0 (see each crate's `rust-toolchain.toml`).
+From a contract directory:
 
 ```
 cargo build --release --target wasm32v1-none
@@ -176,16 +193,21 @@ Tests:
 cargo test --lib
 ```
 
-Or use the upstream `stellar-expert/soroban-build-workflow` action — that's
-what `release.yml` invokes on tag push, with source-code attestation under
-`home_domain: 'onym.chat'`.
+Releases are cut manually with `gh workflow run release.yml -f tag=vX.Y.Z`;
+the workflow builds each contract via `stellar contract build --optimize`
+and stamps the WASMs with `--meta source_repo` and
+`--meta home_domain='onym.chat'`. (The upstream
+`stellar-expert/soroban-build-workflow` action and its source-code
+attestation were dropped in favor of a manual build — see the header
+comment in `release.yml`.)
 
 ## Testnet gas bench
 
 `scripts/bench-gas/run.sh` deploys each contract to Stellar testnet and
-measures per-op fees via `stellar contract invoke`. Triggered automatically
-on tag push from `release.yml` after the build matrix completes; the
-rendered table replaces the GitHub release body.
+measures per-op fees via `stellar contract invoke`. It runs as the
+`bench-gas` job in `release.yml` (manual `workflow_dispatch`) after the
+build matrix completes; the rendered table replaces the GitHub release
+body.
 
 `release.yml` also publishes `contracts-manifest.json` on the latest GitHub
 Release. The asset is regenerated from all historical release bodies plus the

@@ -48,7 +48,7 @@
   },
 
   "vk_kind_enum": {
-    "description": "Two VK kinds — Membership + Create. Both are stored as single VKs (not per-tier arrays) because tier is hardcoded to 0. Membership is the standard 3-IC `(commitment, epoch)` shape used at `verify_membership`. Create is the OneOnOneCreateCircuit VK that binds the 'exactly 2 non-zero leaves' invariant in-circuit at create time. This parallels sep-oligarchy's distinct Create VK (which binds the verbose §4.8 tuple); the pattern is: when a contract needs to enforce a creation-time invariant beyond 'you know a leaf,' that invariant gets its own circuit and VK.",
+    "description": "Two VK kinds — Membership + Create. Both are baked into the WASM via include_bytes! as single VKs (not per-tier arrays) because tier is hardcoded to 0. Membership is the standard 3-IC `(commitment, epoch)` shape used at `verify_membership`. Create is the OneOnOneCreateCircuit VK that binds the 'exactly 2 non-zero leaves' invariant in-circuit at create time. This parallels sep-oligarchy's distinct Create VK (which binds the verbose §4.8 tuple); the pattern is: when a contract needs to enforce a creation-time invariant beyond 'you know a leaf,' that invariant gets its own circuit and VK.",
     "vectors": [
       {
         "name": "Membership",
@@ -102,10 +102,8 @@
       { "field": "member_count", "rationale": "always 2 by definition; storing a constant is noise" }
     ],
     "data_keys": [
-      { "name": "Admin", "value_type": "Address", "storage": "instance", "note": "contract admin; required for update_vk and set_restricted_mode" },
+      { "name": "Admin", "value_type": "Address", "storage": "instance", "note": "contract operator admin; required for set_restricted_mode only. VKs are baked into the WASM (no update_vk entrypoint; rotating a VK means redeploying)." },
       { "name": "RestrictedMode", "value_type": "bool", "storage": "instance", "note": "when true, only the admin may call create_group; toggled by set_restricted_mode (admin-only). Default false." },
-      { "name": "MembershipVK", "value_type": "VerificationKeyData", "storage": "persistent", "note": "Membership-circuit VK (single, not per-tier); 3 IC points; used at verify_membership" },
-      { "name": "CreateVK", "value_type": "VerificationKeyData", "storage": "persistent", "note": "OneOnOneCreate-circuit VK (single, not per-tier); 3 IC points; used at create_group" },
       { "name": "Group(group_id)", "value_type": "CommitmentEntry", "storage": "persistent", "note": "current group state; immutable after create" },
       { "name": "UsedProof(proof_hash)", "value_type": "()", "storage": "persistent (TTL ~30 days via LEDGER_BUMP)", "note": "global-nullifier scope; only create_group writes here" },
       { "name": "GroupCount", "value_type": "u32", "storage": "instance", "note": "active group count; checked against MAX_GROUPS (10000) in create_group. Monotonic increment-only since 1v1 has no deactivate path; the cap is a one-way ratchet. Operationally fine at testnet scale." }
@@ -113,16 +111,8 @@
   },
 
   "admin_entrypoints": {
-    "description": "Admin-gated entrypoints. All require admin.require_auth(); panic on unauth. There is no separate `set_admin` entrypoint — admin is fixed at __constructor.",
+    "description": "Admin-gated entrypoints. All require admin.require_auth(); panic on unauth. There is no separate `set_admin` entrypoint — admin is fixed at __constructor. There is no `update_vk` entrypoint — VKs are baked into the WASM and rotation requires a contract redeploy.",
     "vectors": [
-      {
-        "name": "update_vk",
-        "args": [
-          { "name": "kind", "type": "VkKind", "values": ["Membership", "Create"] },
-          { "name": "new_vk", "type": "VerificationKeyData", "rule": "IC length == 3 (both kinds); subgroup-valid; else InvalidVkLength / InvalidPoint" }
-        ],
-        "purpose": "rotate Membership or Create VK — used for ceremony-rotation. NO `tier` parameter (tier hardcoded to 0)."
-      },
       {
         "name": "set_restricted_mode",
         "args": [

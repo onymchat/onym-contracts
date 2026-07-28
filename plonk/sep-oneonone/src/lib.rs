@@ -8,7 +8,7 @@
 //!   * No tier parameter — tier hardcoded to 0 (Small) → depth=5.
 //!   * Single Membership VK + single Create VK.
 //!
-//! Every value pinned in `contracts/sep-oneonone/test-vectors.json`
+//! Every value pinned in `plonk/sep-oneonone/test-vectors.json`
 //! MUST match the constants and behaviors defined here. The
 //! `test_vectors_consistency` inline test asserts the match.
 //!

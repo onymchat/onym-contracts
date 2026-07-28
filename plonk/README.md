@@ -21,20 +21,20 @@ wire it all together.
   │
   ├── verifier/       on-chain verifier crate. #![no_std],
   │                   targets wasm32v1-none. 2 BLS12-381
-  │                   pairings via Soroban host functions
-  │                   ≈ 12M instructions per verification.
+  │                   pairings in a single pairing_check
+  │                   host call per verification.
   │                   Path-dep'd by every sep-*.
   │
-  ├── sep-anarchy/    ≤ 2¹¹ members, no admin. Any member
-  │                   advances state — 1 membership π.
+  ├── sep-anarchy/    ≤ 2¹¹ members, no group admin. Any
+  │                   member advances state — 1 membership π.
   │
   ├── sep-oneonone/   exactly 2 members, immutable post-
   │                   create. No update entrypoint.
   │
-  ├── sep-democracy/  K-of-N member quorum (in-circuit goal).
-  │                   Not shipping today — the threshold gate
-  │                   is deferred until the K_MAX > 2 prover
-  │                   work lands.
+  ├── sep-democracy/  K-of-N member quorum, enforced
+  │                   in-circuit (K ≤ 2 today; K_MAX raises,
+  │                   ratio thresholds, and tier-2 writes
+  │                   are deferred).
   │
   ├── sep-tyranny/    single pinned admin per group. Cross-
   │                   group unlinkability via fresh group_id.
@@ -47,6 +47,12 @@ wire it all together.
                       co-sign — not "any single admin updates
                       the tree".
 ```
+
+Every sep-* contract additionally stores a deployment-time
+**operator admin** (constructor argument) whose only capability is
+`set_restricted_mode` — gating group *creation* to the operator.
+The operator can never advance or modify existing group state.
+See each contract's README for details.
 
 ```
                        PIPELINE
@@ -67,15 +73,15 @@ wire it all together.
        │                  verifier/  (on-chain)               │
        │                                                      │
        │   #![no_std], wasm32v1-none.                         │
-       │   2 BLS12-381 pairings via Soroban host functions    │
-       │   ≈ 12M instructions per verification.               │
+       │   2 BLS12-381 pairings via a single Soroban          │
+       │   pairing_check host call per verification.          │
        └──────────────────────────┬───────────────────────────┘
                                   │
                                   │  consumed by ×5 sep-*
                                   ▼
                     sep-anarchy    (any member updates)
                     sep-oneonone   (immutable post-create)
-                    sep-democracy  (K-of-N members — deferred)
+                    sep-democracy  (K-of-N members, K ≤ 2)
                     sep-tyranny    (single pinned admin)
                     sep-oligarchy  (K-of-N admins, K ≤ 2)
 ```
@@ -87,8 +93,9 @@ wire it all together.
   ASCII Merkle diagrams and per-circuit public-input shapes.
 - **Generating / regenerating proofs** — `prover/README.md`.
 - **Reading the verifier** — `verifier/src/verifier.rs` is the
-  `verify()` entry point; `verifier/src/transcript.rs` holds
-  the Fiat-Shamir ordering; `verifier/src/vk_format.rs`
+  `verify()` entry point; `verifier/src/verifier_challenges.rs`
+  holds the Fiat-Shamir challenge schedule (`transcript.rs` is
+  the underlying transcript primitive); `verifier/src/vk_format.rs`
   documents the on-chain VK byte layout.
 
 ## Drift control

@@ -1,12 +1,16 @@
 //! SEP Oligarchy Soroban Contract — PLONK migration.
 //!
-//! Per-type private group with hidden member + admin counts (combined
-//! occupancy commitment) and configurable admin quorum threshold.
+//! Per-type private group with a hidden member count (the occupancy
+//! commitment binds `Poseidon(member_count, salt)`; the admin set is
+//! hidden simply because the admin tree never appears on-chain) and a
+//! configurable admin quorum threshold.
 //!
 //! ## Verification
 //!
 //!   * Membership VK (per tier): 2 PIs `(commitment, epoch)` —
-//!     reuses anarchy's per-tier baked VKs.
+//!     oligarchy-specific baked VKs (`oligarchy-membership-vk-d{N}`);
+//!     the 3-level commitment chain means anarchy's VKs would reject
+//!     oligarchy commitments.
 //!   * Create VK: 6 PIs `(commitment, epoch=0,
 //!     occupancy_commitment, member_root, admin_root, salt_initial)`.
 //!   * Update VK: 6 PIs `(c_old, epoch_old, c_new,
