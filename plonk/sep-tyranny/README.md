@@ -93,6 +93,7 @@ cross-group linkability across an admin's groups.
    │                          │    │                              │
    │   • caller.require_auth  │    │   • NO require_auth          │
    │   • tier ≤ 2             │    │     (admin proof IS the auth)│
+   │   • restricted?⇒operator │    │                              │
    │   • canonical Fr(comm)   │    │   • c_old == state.commitment│
    │   • canonical Fr(admin   │    │   • ep_old == BE(state.epoch)│
    │       pubkey commitment) │    │   • canonical Fr(c_new)      │
@@ -218,7 +219,16 @@ cross-group linkability across an admin's groups.
   `Poseidon(Poseidon(admin_secret_key), group_id_fr)`. A chain
   observer reading raw PI[2/3] values across groups can't tell
   they're the same admin without knowing the secret key (Poseidon
-  collision resistance).
+  collision resistance). Scope caveat: `group_id` uniqueness is
+  per contract *instance* — reusing the same `group_id` on a
+  different deployment yields an identical `admin_pubkey_commitment`
+  for the same admin, which links the two groups. Admins wanting
+  cross-deployment unlinkability must use fresh group_ids.
+- **Operator admin & restricted mode.** `__constructor(env, admin)`
+  pins a deployment-time operator whose only capability is
+  `set_restricted_mode`, gating `create_group` to the operator
+  (`Error::AdminOnly` otherwise). The operator is distinct from any
+  group's pinned admin and has no power over existing groups.
 - **Admin commitment lives in a separate persistent storage key.**
   `DataKey::AdminCommitment(group_id) → BytesN<32>` — independent of
   `DataKey::Group(group_id)` so the admin binding survives the

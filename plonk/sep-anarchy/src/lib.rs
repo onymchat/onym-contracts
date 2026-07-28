@@ -1,17 +1,20 @@
 //! SEP Anarchy Soroban Contract — per-type single-signer membership group.
 //!
-//! This is the **per-type Anarchy** contract, one of an eventual four
-//! (Anarchy, OneOnOne, Democracy, Oligarchy) in separate crates. The
+//! This is the **per-type Anarchy** contract, one of five
+//! (Anarchy, OneOnOne, Democracy, Oligarchy, Tyranny) in separate crates. The
 //! `group_type` discriminator is implicit in the contract address;
 //! there is no polymorphic dispatch and no group_type field in storage.
 //!
-//! Anarchy is the protocol's null case: no quorum threshold, no admin
-//! set, no occupancy commitment. `member_count` on storage is
+//! Anarchy is the protocol's null case: no quorum threshold, no group
+//! admin set, no occupancy commitment. (A deployment-time operator
+//! admin exists solely to toggle `set_restricted_mode`, which gates
+//! `create_group`; it has no power over existing groups.)
+//! `member_count` on storage is
 //! informational only — supplied at create_group, never updated by
 //! the contract. Operators who don't want to publish a count pass `0`
 //! (the v1 sep-xxxx "not tracked" sentinel).
 //!
-//! Every value pinned in `contracts/sep-anarchy/test-vectors.json`
+//! Every value pinned in `plonk/sep-anarchy/test-vectors.json`
 //! MUST match the constants and behaviors defined here. The
 //! `test_vectors_consistency` inline test asserts the match at build
 //! time.
@@ -92,7 +95,7 @@ fn tier_capacity(tier: u32) -> u32 {
 // Embedded baked VKs + SRS-G2
 // ================================================================
 //
-// All bytes come from `contracts/plonk-verifier/tests/fixtures/`,
+// All bytes come from `plonk/verifier/tests/fixtures/`,
 // produced by the off-chain prover-side
 // `circuit::plonk::verifier::tests::plonk_verifier_fixtures_match_or_regenerate`
 // test (which double-acts as a drift detector when run without

@@ -112,11 +112,12 @@ enforcement in-circuit. The most security-load-bearing of the five contracts.
    │  6 scalars                 │  │                              │
    │                            │  │  • NO require_auth           │
    │  • caller.require_auth     │  │    (K-of-N proof IS the auth)│
+   │  • restricted? ⇒ operator  │  │                              │
    │  • member_tier ≤ 2         │  │  • c_old == state.commitment │
-   │  • threshold ∈ [1, 100]    │  │  • ep_old == BE(state.epoch) │
-   │    (CIRCUIT enforces       │  │  • canonical Fr(c_new)       │
-   │     ≤ K_MAX = 2 in 2-bit   │  │  • canonical Fr(occ_new)     │
-   │     range gate)            │  │  • occ_old == state.occ      │
+   │  • threshold ∈ [1, 2]      │  │  • ep_old == BE(state.epoch) │
+   │    (= K_MAX; contract AND  │  │  • canonical Fr(c_new)       │
+   │     circuit both enforce   │  │  • canonical Fr(occ_new)     │
+   │     it; 2-bit range gate)  │  │  • occ_old == state.occ      │
    │  • canonical Fr(comm), occ │  │  • threshold == BE(          │
    │  • PI[0..3] match wire args│  │      state.threshold)        │
    │    PI[3..6] (root/admin/   │  │    ↑ contract-supplied; the  │
@@ -230,9 +231,11 @@ enforcement in-circuit. The most security-load-bearing of the five contracts.
 
      anti-double-count, for every pair (j, i) with i > j:
        active_j · active_i · is_equal(leaf_idx_j, leaf_idx_i)  ==  0
-     (relies on admin-tree uniqueness — distinctness is on
-      `leaf_idx`, not `Poseidon(sk)`. The off-circuit admin tree
-      builder must dedupe secret keys.)
+       active_j · active_i · is_equal(leaf_j,     leaf_i)      ==  0
+     (distinctness is enforced on BOTH the tree position AND the
+      leaf value `Poseidon(sk)` — the same secret key seated at two
+      distinct leaf indices is rejected in-circuit; soundness does
+      not rely on off-circuit sk dedup by the tree builder)
 
 
      K = Σ active_i           K ≤ K_MAX = 2
@@ -306,10 +309,13 @@ enforcement in-circuit. The most security-load-bearing of the five contracts.
   chain but the circuit doesn't constrain how the new tree relates
   to the old beyond `|count_new − count_old| ≤ 1`. Documented in
   `oligarchy.rs`'s module header; future work.
-- **Stale module docstring**: `lib.rs:19-25` still claims "the PLONK
-  ports preserve PI shapes but reduce in-circuit semantics to
-  commitment binding" with K-of-N + delta + admin-tree membership
-  flagged as follow-up. That's no longer true post-PR #205 / #207 /
-  #214 — all three are enforced today (member-tier 0/1/2 for the
-  update circuit; per-tier oligarchy-membership at d=5/d=8/d=11).
-  Worth updating the docstring in a small follow-up.
+- **Operator admin & restricted mode.** `__constructor(env, admin)`
+  pins a deployment-time operator whose only capability is
+  `set_restricted_mode`, gating `create_oligarchy_group` to the
+  operator (`Error::AdminOnly` otherwise). The operator is NOT an
+  oligarchy admin — it holds no admin-tree leaf and has no power over
+  existing groups.
+- **Admin/member disjointness is not enforced.** The two trees are
+  structurally separate, but nothing in the circuit or contract
+  prevents the same secret key from holding a leaf in both trees;
+  keeping the sets disjoint is an off-chain tree-builder convention.

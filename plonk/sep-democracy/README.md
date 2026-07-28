@@ -1,8 +1,10 @@
 # sep-democracy
 
-Per-type **private group** on Soroban with **K-of-N admin quorum** + hidden
-member counts (an occupancy commitment) + a configurable threshold. Update
-authorization is in-circuit at tier 0/1. Tier 2 is currently disabled for
+Per-type **private group** on Soroban with **K-of-N member quorum** + hidden
+member counts (an occupancy commitment) + a configurable threshold. The
+"admin signers" below are ordinary members acting as update authorizers —
+they Merkle-open against the *member* tree; there is no separate admin tree
+(that's sep-oligarchy). Update authorization is in-circuit at tier 0/1. Tier 2 is currently disabled for
 create/update because its d=11 update circuit is only a simplified
 single-signer fallback (an SRS-budget constraint, see Notes).
 
@@ -92,29 +94,30 @@ single-signer fallback (an SRS-budget constraint, see Notes).
    ┌──────────────────────────┐    ┌──────────────────────────────┐
    │   create_group           │    │   update_commitment          │
    │                          │    │                              │
-   │   PI = (COMMITMENT, 0)   │    │   PI = (c_old, ep_old, c_new,│
-   │   2 scalars              │    │          occ_old, occ_new,   │
+   │   PI = (COMMITMENT, 0,   │    │   PI = (c_old, ep_old, c_new,│
+   │     occ_init); 3 scalars │    │          occ_old, occ_new,   │
    │                          │    │          threshold)          │
    │   • caller.require_auth  │    │   6 scalars                  │
+   │   • restricted? ⇒ admin  │    │                              │
    │   • tier ≤ 1             │    │                              │
-   │   • threshold ∈ [1,100]  │    │   • NO require_auth          │
-   │     (contract level —    │    │     (proof IS the auth)      │
-   │     CIRCUIT enforces     │    │   • state.tier ≤ 1           │
-   │     ≤ K_MAX = 2 in the   │    │   • c_old == state.commitment│
-   │     quorum branch)       │    │   • ep_old == BE(state.epoch)│
+   │   • threshold ∈ [1,2]    │    │   • NO require_auth          │
+   │     (= K_MAX; enforced   │    │     (proof IS the auth)      │
+   │     at contract level    │    │   • state.tier ≤ 1           │
+   │     AND in-circuit in    │    │   • c_old == state.commitment│
+   │     the quorum branch)   │    │   • ep_old == BE(state.epoch)│
    │                          │    │   • canonical Fr(c_new)      │
    │   • canonical Fr(comm)   │    │   • canonical Fr(occ_new)    │
    │   • canonical Fr(occ)    │    │   • occ_old == state.occ     │
    │   • PI[0] == comm arg    │    │   • threshold == BE(         │
-   │   • PI[1] == BE(0)       │    │       state.threshold)       │
+   │   • PI[1]==0, PI[2]==occ │    │       state.threshold)       │
    │   • !group_exists        │    │     ↑ contract-supplied; the │
    │   • count < 10 000       │    │       caller can't lie about │
    │   • SHA256(π) ∉ UsedProof│    │       which threshold the    │
    │                          │    │       proof binds            │
    │   verify(π,              │    │   • state.active             │
-   │     MEMBERSHIP_VK[tier], │    │   • SHA256(π) ∉ UsedProof    │
+   │     CREATE_VK[tier],     │    │   • SHA256(π) ∉ UsedProof    │
    │     PI)                  │    │                              │
-   │   ↑ shared with anarchy  │    │   verify(π,                  │
+   │   ↑ democracy-create VK  │    │   verify(π,                  │
    │                          │    │     UPDATE_VK[tier],         │
    │   record SHA256(π)       │    │     PI)                      │
    │   store CommitmentEntry  │    │                              │
@@ -206,13 +209,21 @@ single-signer fallback (an SRS-budget constraint, see Notes).
   Poseidon(Poseidon(Poseidon(ROOT_X, epoch_X), salt_X), occ_X)`. The
   `occ_X` factor lets the same root + salt produce different commitments
   across membership-count snapshots.
-- **`update_commitment` carries no `require_auth`.** The K-of-N admin
+- **`update_commitment` carries no `require_auth`.** The K-of-N member
   quorum proof is the authorization — any address can submit on behalf
   of the group. Replay protection via `UsedProof(SHA256(π))`.
-- **`verify_membership` reuses the shared `vk-d{5,8,11}.bin`** from
-  sep-anarchy. A 2-level commitment chain matches the on-chain
-  representation read-back path; quorum semantics are an
-  update-time-only concern.
+- **Operator admin & restricted mode.** `__constructor(env, admin)` pins
+  a deployment-time operator whose only capability is
+  `set_restricted_mode`, gating `create_group` to the operator
+  (`Error::AdminOnly` otherwise). The operator has no role in the quorum
+  and no power over existing groups.
+- **`verify_membership` uses democracy-specific membership VKs**
+  (`democracy-membership-vk-d{5,8,11}.bin`), NOT sep-anarchy's
+  `vk-d{5,8,11}.bin`: democracy commitments carry a 3-level Poseidon
+  chain (root → epoch → salt → occ), so the anarchy 2-level-chain VK
+  rejects them. Quorum semantics remain an update-time-only concern —
+  the membership circuit's wire-PI shape `(commitment, epoch)` is
+  unchanged and `occupancy_commitment` stays a private witness.
 - **Tier 2 disabled for create/update (issue [#12](https://github.com/onymchat/onym-contracts/issues/12))**: the K-of-N quorum circuit at depth 11
   blows the n=32,768 SRS ceiling. Under the EF KZG 2023 ceremony's
   published sizes there's no n=65,536 SRS to consume, so tier-2 updates

@@ -7,7 +7,9 @@
 //! ## Verification
 //!
 //!   * Membership VK (per tier): 2 PIs `(commitment, epoch)` —
-//!     reuses anarchy's baked VKs.
+//!     democracy-specific baked VKs (`democracy-membership-vk-d{N}`);
+//!     the 3-level commitment chain means anarchy's VKs would reject
+//!     democracy commitments.
 //!   * Update VK (per tier): 6 PIs `(c_old, epoch_old, c_new,
 //!     occupancy_commitment_old, occupancy_commitment_new,
 //!     threshold_numerator)`.

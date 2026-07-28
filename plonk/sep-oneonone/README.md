@@ -1,8 +1,14 @@
 # sep-oneonone
 
 Per-type **immutable two-party** group on Soroban — exactly 2 founding
-members, no admin, no quorum, no `update_commitment`, no `deactivate_group`.
-A 1v1 group is a single state set at creation and never advanced.
+members, no group admin, no quorum, no `update_commitment`, no
+`deactivate_group`. A 1v1 group is a single state set at creation and
+never advanced.
+
+The contract does store a deployment-time **operator admin** (constructor
+argument) whose only capability is `set_restricted_mode`: when restricted
+mode is on, `create_group` is operator-only. The operator has no power
+over existing groups — created state stays frozen regardless. See Notes.
 
 ```
                   SEP-ONEONONE  —  (sk₀, sk₁) → π flow
@@ -72,7 +78,8 @@ A 1v1 group is a single state set at creation and never advanced.
    │   2 scalars              │    │   PI = (commitment, epoch)   │
    │                          │    │   2 scalars                  │
    │   • caller.require_auth  │    │                              │
-   │   • canonical Fr(comm)   │    │   • PI matches stored state  │
+   │   • restricted? ⇒ admin  │    │   • PI matches stored state  │
+   │   • canonical Fr(comm)   │    │                              │
    │   • PI[0] == comm arg    │    │   • verify(π, MEMBERSHIP_VK, │
    │   • PI[1] == BE(0)       │    │             PI)              │
    │   • !group_exists        │    │     ↑ same VK as sep-anarchy │
@@ -191,6 +198,18 @@ A 1v1 group is a single state set at creation and never advanced.
 
 ## Notes
 
+- **Operator admin & restricted mode.** `__constructor(env, admin)` pins a
+  deployment-time operator. `set_restricted_mode(true)` (operator-only,
+  emits `RestrictedModeChanged`) gates `create_group` behind the operator
+  (`Error::AdminOnly` otherwise). This throttles *new* group creation
+  only — it cannot touch existing groups, and there is no VK-rotation or
+  admin-rotation entrypoint (rotating a VK means redeploying). Storage
+  keys: `DataKey::Admin`, `DataKey::RestrictedMode`.
+- **`Ok(false)` covers proof rejection, not malformed curve points.**
+  `verify_membership` returns `Ok(false)` when a well-formed proof fails
+  verification; adversarial off-curve proof bytes trap inside the BLS
+  host primitives instead of returning (see the doc comment on
+  `verify_membership` in `src/lib.rs`).
 - **VK split, single tier.** Two distinct VKs are baked in:
   `MEMBERSHIP_VK` = `vk-d5.bin` (shared with `sep-anarchy`) for
   `verify_membership`, and `CREATE_VK` = `oneonone-create-vk.bin`
@@ -208,7 +227,7 @@ A 1v1 group is a single state set at creation and never advanced.
 - **Synthesis-time zero-folding.** The naive depth-5 tree
   reconstruction is ~32k gates — exactly the n=32,768 SRS ceiling, and
   jf-plonk's preprocess needs *strictly more* powers than gates. The
-  optimization at `oneonone_create.rs:73-99` precomputes the
+  zero-folding optimization in `oneonone_create.rs` precomputes the
   `Z_0..Z_{depth-1}` zero-subtree constants at synthesis time and
   inlines them, leaving only `DEPTH` Poseidon ops in the active spine.
 - **Membership-VK reuse.** A 1v1 group's commitment is byte-identical
