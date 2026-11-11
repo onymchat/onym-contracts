@@ -22,8 +22,12 @@ target
 # tracked for reproducible WASM builds; verifier crates are locked
 # through them. Prover crates are off-chain bench-only binaries — not
 # release artefacts — so their lockfiles are not tracked either.
-plonk/verifier/Cargo.lock
-plonk/prover/Cargo.lock
+#
+# Exception: plonk/verifier and plonk/prover ARE tracked. CI tests them
+# standalone, and untracked locks let fresh resolutions drift into
+# versions that no longer build (a rand_core mismatch in
+# soroban-env-host testutils; enum-ordinalize 4.4 needing rustc 1.89
+# vs the prover's 1.88 pin).
 pq/verifier/Cargo.lock
 pq/prover/Cargo.lock
 pq/sha-fri/Cargo.lock
