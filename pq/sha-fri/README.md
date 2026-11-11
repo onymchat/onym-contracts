@@ -1,16 +1,33 @@
-# sha-fri: SHA-256 FRI feasibility prototype
+# sha-fri: post-quantum membership STARK for Soroban
 
 `pq/verifier` hashes with the BN254 Poseidon2 host primitive. One
 permutation costs about 707K CPU instructions under the soroban-sdk 26
 cost model. At toy parameters (about 8 bits of security) its FRI ops
 already use about 282M CPU and about 60 MB of memory, over the 40 MiB
-cap. This crate tests the alternative: **BabyBear arithmetic in plain
-WASM plus SHA-256 commitments** (about 8.4K CPU per host call).
+cap. This crate uses **BabyBear arithmetic in plain WASM plus SHA-256
+commitments** (about 8.4K CPU per host call) instead.
 
 ```
-  pq/sha-fri/          no_std verifier + `prover` feature (bench prover)
+  pq/sha-fri/          no_std verifier + `prover` feature
+    air.rs             membership AIR (Poseidon2-BabyBear-16, one row per round)
+    poseidon2*.rs      permutation, generic over F / E; prototype constants
+    verifier.rs        AIR check at z, DEEP, FRI
+    prover.rs          ZK prover (masking, randomizers, salted leaves)
   pq/sha-fri-bench/    Soroban contract: verify(params, proof, pi) -> bool
-  pq/sha-fri-runner/   proves presets, runs the WASM under host metering
+  pq/sha-fri-runner/   proves random members, runs the WASM under metering
+```
+
+## Statement
+
+The PQ analogue of `plonk/prover`'s `MembershipCircuit`:
+
+```
+  public:  commitment (8 × BabyBear), epoch (u64)
+  private: sk, Merkle path + index bits, salt
+
+  leaf       = H(sk ‖ 0⁸)
+  root       = MerkleOpen(leaf, path, bits)          (root stays private)
+  commitment = H(H(root ‖ epoch limbs ‖ 0⁵) ‖ salt)
 ```
 
 ## Run
@@ -22,37 +39,44 @@ cd ../sha-fri-runner && cargo run --release -- \
   ../sha-fri-bench/target/wasm32v1-none/release/pq_sha_fri_bench_contract.wasm
 ```
 
-## Results (2026-11-11, soroban-sdk 26.0.0 testutils, unoptimized 13.9 KB WASM)
+## Results (2026-11-11, soroban-sdk 26.0.0 testutils metering, unoptimized 24.6 KB WASM)
 
 Caps: 400M instructions, 40 MiB memory, 132,096-byte tx (live futurenet
 and testnet values). Tx size = proof + params + PI + 1 KB of overhead.
+All proofs are zero-knowledge (mask degree = queries × 2 + 2).
 
-| Preset | Trace | Blowup | Queries | Grind | Security (conj / Johnson) | Proof | % tx | CPU | % CPU | Mem | % mem |
+| Preset | Rows | Quotient chunks | Queries | Security (conj / Johnson) | Proof | % tx | CPU | % CPU | Mem | % mem | Prove |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| membership d11, conjectured | 2^9 × 48 | 16 | 20 | 20 | 100 / 60 | 24.8 KB | 19.6% | 28.3M | 7.1% | 1.5 MB | 3.6% |
-| membership d11, Johnson | 2^9 × 48 | 16 | 40 | 20 | 180 / 100 | 47.2 KB | 36.5% | 54.9M | 13.7% | 1.7 MB | 4.1% |
-| 4× circuit, Johnson | 2^11 × 48 | 16 | 40 | 20 | 180 / 100 | 61.7 KB | 47.5% | 70.2M | 17.5% | 1.9 MB | 4.5% |
-| 32× circuit, Johnson | 2^14 × 48 | 16 | 40 | 20 | 180 / 100 | 84.0 KB | 64.4% | 92.6M | 23.1% | 2.2 MB | 5.1% |
-| rate 1/2, conjectured | 2^9 × 48 | 2 | 80 | 20 | 100 / 60 | 71.2 KB | 54.7% | 88.9M | 22.2% | 1.8 MB | 4.4% |
-| wide trace, Johnson | 2^5 × 400 | 16 | 40 | 20 | 180 / 100 | 147 KB | **112%** | 157.6M | 39.4% | 1.9 MB | 4.5% |
+| d5, blowup 16 | 256 | 9 | 20 | 100 / 60 | 36.1 KB | 28% | 67.2M | 17% | 1.6 MB | 4% | 1.1 s |
+| d8, blowup 16 | 512 | 8 | 20 | 100 / 60 | 39.3 KB | 31% | 70.1M | 18% | 1.7 MB | 4% | 0.3 s |
+| d11, blowup 16 | 512 | 8 | 20 | 100 / 60 | 39.3 KB | 31% | 70.1M | 18% | 1.7 MB | 4% | 0.7 s |
+| d5, blowup 16 | 256 | 10 | 40 | 180 / 100 | 69.6 KB | 54% | 116.6M | 29% | 2.0 MB | 5% | 0.3 s |
+| d8, blowup 16 | 512 | 9 | 40 | 180 / 100 | 76.0 KB | 58% | 122.4M | 31% | 2.1 MB | 5% | 0.3 s |
+| **d11, blowup 16** | 512 | 9 | 40 | 180 / **100** | **76.0 KB** | **58%** | **122.4M** | **31%** | 2.1 MB | 5% | 0.3 s |
+| d11, blowup 8 | 512 | 9 | 54 | 182 / 101 | 94.0 KB | 72% | 151.7M | 38% | 2.2 MB | 5% | 0.1 s |
+
+Prove times are single-threaded on an Apple Silicon desktop.
 
 Takeaways:
-- **Proof size is the binding constraint, not CPU or memory.** The
-  trace leaf (`arity × columns × 4 B`) dominates, so the AIR must stay
-  narrow (tens of columns, not Plonky3's one-row-per-permutation width).
-- High blowup (16) beats rate 1/2 on every axis.
+- **The full ZK membership proof fits one transaction** at all three PLONK
+  tiers. Proof size is the tightest limit.
+- The quotient tree is the biggest opening: 8–10 chunks (32–40 columns)
+  come from the degree-7 S-box multiplied by degree-~n periodic
+  selectors. Degree-3 auxiliary S-box columns would cut that roughly
+  in half.
+- Rejecting a wrong epoch costs about 18.5M CPU: the AIR check at `z` and
+  setup run before any query work.
 
-## Not covered (needed before this is a real verifier)
+## Not covered (needed before production)
 
-- **No AIR constraint check at `z`.** The verifier binds the OOD values
-  to the committed trace but not to a circuit. That check is
-  extension-field arithmetic only (adds CPU, no hashes, about `W × 16 B`
-  of proof), and it needs a second OOD point `z·g`.
-- **Not zero-knowledge.** The trace is not randomized, so openings leak
-  witness values. Membership privacy needs a hiding STARK (trace
-  blinding rows plus a masked FRI batch).
-- Security columns are heuristics: `q·log₂(blowup) + grind` (conjectured)
-  and half the per-query bits (Johnson regime). A real parameter choice
-  needs a proper soundness calculator.
+- **Poseidon2 constants are not canonical.** Swap in Plonky3's
+  BabyBear-16 set (round constants and internal diagonal) and add KATs.
+- **The bench prover's randomness is seeded xorshift.** Production must
+  use a CSPRNG, or the proof is not zero-knowledge.
+- Security figures are heuristics. A real parameter choice needs a
+  soundness calculator (FRI + DEEP-ALI + grinding).
+- Not wired into `pq/sep-anarchy` yet (contract API, VK storage,
+  `update_commitment` circuit).
 - Measured with testutils metering (same cost model as the network), not
   on a live network.
+- No audit.

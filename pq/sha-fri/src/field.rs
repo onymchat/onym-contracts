@@ -232,6 +232,39 @@ impl Mul for E {
     }
 }
 
+impl From<F> for E {
+    fn from(f: F) -> E {
+        E::from_base(f)
+    }
+}
+
+/// Ring operations shared by `F` and `E`, so one AIR constraint
+/// implementation serves both the prover (base-field points of the LDE
+/// coset) and the verifier (extension-field OOD point `z`).
+pub trait Algebra: Copy + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + From<F> {
+    const ZERO: Self;
+    const ONE: Self;
+    fn mul_f(self, f: F) -> Self;
+}
+
+impl Algebra for F {
+    const ZERO: F = F::ZERO;
+    const ONE: F = F::ONE;
+    #[inline]
+    fn mul_f(self, f: F) -> F {
+        self * f
+    }
+}
+
+impl Algebra for E {
+    const ZERO: E = E::ZERO;
+    const ONE: E = E::ONE;
+    #[inline]
+    fn mul_f(self, f: F) -> E {
+        self.mul_base(f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
