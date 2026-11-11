@@ -155,6 +155,7 @@ fn prove_trace<H: Hasher>(
     let chunks = p.num_quotient_chunks();
     let m0 = 1usize << p.log_arities[0];
     let params_bytes = p.to_bytes();
+    assert_eq!(p.kind, shape.kind);
     let pi_bytes = pi.to_bytes();
     let mut rng = Rng(seed | 1);
     let g = F::two_adic_generator(p.log_n());
@@ -187,9 +188,10 @@ fn prove_trace<H: Hasher>(
     let alpha = tr.challenge_ext();
 
     // ---- Quotient on the LDE coset ----------------------------------
-    let mut alpha_pows = Vec::with_capacity(air::NUM_CONSTRAINTS);
+    let count = air::num_constraints(shape.kind);
+    let mut alpha_pows = Vec::with_capacity(count);
     let mut a = E::ONE;
-    for _ in 0..air::NUM_CONSTRAINTS {
+    for _ in 0..count {
         alpha_pows.push(a);
         a = a * alpha;
     }
@@ -197,7 +199,7 @@ fn prove_trace<H: Hasher>(
     let omega0 = F::two_adic_generator(log_n0);
     let step = n0 / n; // g = ω₀^step
     let mut q_evals = Vec::with_capacity(n0);
-    let mut nums: Vec<F> = Vec::with_capacity(air::NUM_CONSTRAINTS);
+    let mut nums: Vec<F> = Vec::with_capacity(count);
     let mut local = [F::ZERO; NUM_COLS];
     let mut next = [F::ZERO; NUM_COLS];
     let mut x = SHIFT;
@@ -338,26 +340,36 @@ fn prove_trace<H: Hasher>(
     proof
 }
 
-/// Random witness for benches and tests: random key, path, salt.
-pub fn random_witness(depth: usize, seed: u64) -> Witness {
+/// Random membership witness for benches and tests: random key, path,
+/// salt; `epoch` as given.
+pub fn random_witness(depth: usize, seed: u64, epoch: u64) -> Witness {
     let mut rng = Rng(seed | 1);
     let mut digest = || -> [F; 8] { core::array::from_fn(|_| F::from_u64(rng.next())) };
     let sk = digest();
     let salt = digest();
     let path = (0..depth).map(|_| digest()).collect();
     let index = (seed as usize) & ((1 << depth) - 1);
-    Witness { sk, path, index, salt, epoch: 0x0000_1234_5678_9abc }
+    Witness { sk, path, index, salt, epoch, update: None }
+}
+
+/// The same member's update from `w`'s state to a random new root/salt.
+pub fn with_random_update(mut w: Witness, seed: u64) -> Witness {
+    let mut rng = Rng(seed.rotate_left(17) | 1);
+    let mut digest = || -> [F; 8] { core::array::from_fn(|_| F::from_u64(rng.next())) };
+    w.update = Some(air::UpdateWitness { root_new: digest(), salt_new: digest() });
+    w
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::air::PublicInputs;
+    use crate::air::{Kind, PublicInputs};
     use crate::hash::Sha2Hasher;
     use crate::verifier::{verify, VerifyError};
 
-    fn small() -> Params {
+    fn small(kind: Kind) -> Params {
         Params {
+            kind,
             depth: 3,
             mask_degree: 26,
             log_blowup: 3,
@@ -367,6 +379,16 @@ mod tests {
             log_arities: vec![1, 2, 2],
         }
     }
+
+    fn witness(kind: Kind) -> Witness {
+        let w = random_witness(3, 5, 0x0000_1234_5678_9abc);
+        match kind {
+            Kind::Membership => w,
+            Kind::Update => with_random_update(w, 6),
+        }
+    }
+
+    const KINDS: [Kind; 2] = [Kind::Membership, Kind::Update];
 
     #[test]
     fn constants_match_derivation() {
@@ -390,22 +412,24 @@ mod tests {
 
     #[test]
     fn trace_satisfies_air_on_trace_domain() {
-        let p = small();
-        let shape = p.shape();
-        let w = random_witness(shape.depth, 11);
-        let pi = w.public_inputs();
-        let rows = w.trace(&shape);
-        let g = F::two_adic_generator(shape.log_n());
-        let mut nums = Vec::new();
-        for r in 0..shape.n() {
-            let per = air::periodic_row(r % air::BLOCK);
-            air::eval(&shape, &rows[r], &rows[(r + 1) % shape.n()], &per, &pi, &mut nums);
-            let x = g.pow(r as u64);
-            let divs = air::divisors(&shape, x, x.pow(shape.n() as u64), g);
-            for (gi, &(s, e)) in air::GROUPS.iter().enumerate() {
-                if divs[gi] == F::ZERO {
-                    for i in s..e {
-                        assert_eq!(nums[i], F::ZERO, "row {r} group {gi} constraint {i}");
+        for kind in KINDS {
+            let p = small(kind);
+            let shape = p.shape();
+            let w = witness(kind);
+            let pi = w.public_inputs();
+            let rows = w.trace(&shape);
+            let g = F::two_adic_generator(shape.log_n());
+            let mut nums = Vec::new();
+            for r in 0..shape.n() {
+                let per = air::periodic_row(r % air::BLOCK);
+                air::eval(&shape, &rows[r], &rows[(r + 1) % shape.n()], &per, &pi, &mut nums);
+                let x = g.pow(r as u64);
+                let divs = air::divisors(&shape, x, x.pow(shape.n() as u64), g);
+                for (gi, &(s, e)) in air::groups(kind).iter().enumerate() {
+                    if divs[gi] == F::ZERO {
+                        for i in s..e {
+                            assert_eq!(nums[i], F::ZERO, "{kind:?} row {r} group {gi} constraint {i}");
+                        }
                     }
                 }
             }
@@ -426,49 +450,90 @@ mod tests {
 
     #[test]
     fn prove_then_verify_accepts() {
-        for arities in [vec![1, 2, 2], vec![2, 3], vec![1, 1, 1, 1]] {
-            // Hiding needs mask degree ≥ queries · 2^a₀ + 2.
-            let h = 12 * (1u16 << arities[0]) + 2;
-            let p = Params { mask_degree: h, log_arities: arities, ..small() };
-            let w = random_witness(p.depth as usize, 5);
-            let proof = prove(&Sha2Hasher, &p, &w, 99);
-            let pi = w.public_inputs().to_bytes();
-            assert_eq!(verify(&Sha2Hasher, &p.to_bytes(), &proof, &pi), Ok(()), "{:?}", p.log_arities);
+        for kind in KINDS {
+            for arities in [vec![1, 2, 2], vec![2, 3], vec![1, 1, 1, 1]] {
+                // Hiding needs mask degree ≥ queries · 2^a₀ + 2.
+                let h = 12 * (1u16 << arities[0]) + 2;
+                let p = Params { mask_degree: h, log_arities: arities, ..small(kind) };
+                let w = witness(kind);
+                let proof = prove(&Sha2Hasher, &p, &w, 99);
+                let pi = w.public_inputs().to_bytes();
+                assert_eq!(verify(&Sha2Hasher, &p.to_bytes(), &proof, &pi), Ok(()), "{kind:?} {:?}", p.log_arities);
+            }
         }
     }
 
     #[test]
-    fn rejects_wrong_epoch_and_commitment() {
-        let p = small();
-        let w = random_witness(p.depth as usize, 5);
-        let proof = prove(&Sha2Hasher, &p, &w, 99);
-        let pi = w.public_inputs();
-        let wrong_epoch = PublicInputs { commitment: pi.commitment, epoch: pi.epoch + 1 };
-        assert!(verify(&Sha2Hasher, &p.to_bytes(), &proof, &wrong_epoch.to_bytes()).is_err());
-        let mut c = pi.commitment;
-        c[3] = c[3] + F::ONE;
-        let wrong_commit = PublicInputs { commitment: c, epoch: pi.epoch };
-        assert!(verify(&Sha2Hasher, &p.to_bytes(), &proof, &wrong_commit.to_bytes()).is_err());
+    fn deployment_params_are_valid_for_every_tier() {
+        use crate::params::{deployment_params, Profile};
+        for kind in KINDS {
+            for depth in [5u8, 8, 11] {
+                for profile in [Profile::Johnson100, Profile::Conjectured100] {
+                    let p = deployment_params(kind, depth, profile);
+                    assert_eq!(p.validate(), Ok(()), "{kind:?} d{depth} {profile:?}");
+                    assert_eq!(p.final_poly_len(), 1);
+                    let bits = match profile {
+                        Profile::Johnson100 => p.johnson_security_bits(),
+                        Profile::Conjectured100 => p.conjectured_security_bits(),
+                    };
+                    assert!(bits >= 100, "{kind:?} d{depth} {profile:?}: {bits} bits");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_public_inputs() {
+        for kind in KINDS {
+            let p = small(kind);
+            let w = witness(kind);
+            let proof = prove(&Sha2Hasher, &p, &w, 99);
+            let pi = w.public_inputs();
+            let pb = p.to_bytes();
+            let wrong_epoch = PublicInputs { epoch: pi.epoch + 1, ..w.public_inputs() };
+            assert!(verify(&Sha2Hasher, &pb, &proof, &wrong_epoch.to_bytes()).is_err());
+            let mut c = pi.commitment;
+            c[3] = c[3] + F::ONE;
+            let wrong_commit = PublicInputs { commitment: c, ..w.public_inputs() };
+            assert!(verify(&Sha2Hasher, &pb, &proof, &wrong_commit.to_bytes()).is_err());
+            if kind == Kind::Update {
+                let mut c_new = pi.c_new.unwrap();
+                c_new[0] = c_new[0] + F::ONE;
+                let wrong_new = PublicInputs { c_new: Some(c_new), ..w.public_inputs() };
+                assert!(verify(&Sha2Hasher, &pb, &proof, &wrong_new.to_bytes()).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_proof_of_the_other_kind() {
+        let w = witness(Kind::Update);
+        let proof = prove(&Sha2Hasher, &small(Kind::Update), &w, 99);
+        let mut pi = w.public_inputs();
+        pi.c_new = None;
+        assert!(verify(&Sha2Hasher, &small(Kind::Membership).to_bytes(), &proof, &pi.to_bytes()).is_err());
     }
 
     #[test]
     fn rejects_any_single_byte_flip() {
-        let p = small();
-        let w = random_witness(p.depth as usize, 5);
-        let proof = prove(&Sha2Hasher, &p, &w, 99);
-        let pb = p.to_bytes();
-        let pi = w.public_inputs().to_bytes();
-        for i in (0..proof.len()).step_by(41) {
-            let mut bad = proof.clone();
-            bad[i] ^= 0x01;
-            assert!(verify(&Sha2Hasher, &pb, &bad, &pi).is_err(), "byte {i} flip accepted");
+        for kind in KINDS {
+            let p = small(kind);
+            let w = witness(kind);
+            let proof = prove(&Sha2Hasher, &p, &w, 99);
+            let pb = p.to_bytes();
+            let pi = w.public_inputs().to_bytes();
+            for i in (0..proof.len()).step_by(41) {
+                let mut bad = proof.clone();
+                bad[i] ^= 0x01;
+                assert!(verify(&Sha2Hasher, &pb, &bad, &pi).is_err(), "{kind:?} byte {i} flip accepted");
+            }
         }
     }
 
     #[test]
     fn rejects_truncated_and_extended() {
-        let p = small();
-        let w = random_witness(p.depth as usize, 5);
+        let p = small(Kind::Membership);
+        let w = witness(Kind::Membership);
         let proof = prove(&Sha2Hasher, &p, &w, 99);
         let pb = p.to_bytes();
         let pi = w.public_inputs().to_bytes();
@@ -483,8 +548,18 @@ mod tests {
     fn prover_refuses_non_member() {
         // Someone holding a different key tries to prove against the
         // real group commitment: the commitment boundary can't hold.
-        let p = small();
-        let mut w = random_witness(p.depth as usize, 5);
+        let p = small(Kind::Membership);
+        let mut w = witness(Kind::Membership);
+        let real = w.public_inputs();
+        w.sk[0] = w.sk[0] + F::ONE;
+        prove_trace(&Sha2Hasher, &p, &real, w.trace(&p.shape()), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "AIR not satisfied")]
+    fn prover_refuses_update_by_non_member() {
+        let p = small(Kind::Update);
+        let mut w = witness(Kind::Update);
         let real = w.public_inputs();
         w.sk[0] = w.sk[0] + F::ONE;
         prove_trace(&Sha2Hasher, &p, &real, w.trace(&p.shape()), 1);
@@ -492,10 +567,10 @@ mod tests {
 
     #[test]
     fn rejects_proof_for_different_params() {
-        let p = small();
-        let w = random_witness(p.depth as usize, 5);
+        let p = small(Kind::Membership);
+        let w = witness(Kind::Membership);
         let proof = prove(&Sha2Hasher, &p, &w, 99);
-        let other = Params { num_queries: 13, mask_degree: 28, ..small() };
+        let other = Params { num_queries: 13, mask_degree: 28, ..small(Kind::Membership) };
         let pi = w.public_inputs().to_bytes();
         assert!(verify(&Sha2Hasher, &other.to_bytes(), &proof, &pi).is_err());
     }

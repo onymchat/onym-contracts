@@ -6,6 +6,7 @@
 //! the live futurenet/testnet values (`contract_compute_v0`,
 //! `contract_bandwidth_v0`, read 2026-11-11 via getLedgerEntries).
 
+use sha_fri::air::Kind;
 use sha_fri::hash::Sha2Hasher;
 use sha_fri::params::Params;
 use sha_fri::{prover, verifier};
@@ -35,6 +36,7 @@ fn arities(log_n0: u32, log_blowup: u8) -> Vec<u8> {
 
 fn preset(name: &'static str, depth: u8, log_blowup: u8, num_queries: u16, grind_bits: u8) -> Preset {
     let mut params = Params {
+        kind: Kind::Membership,
         depth,
         // Minimum for hiding: every revealed evaluation is covered.
         mask_degree: num_queries * 2 + 2,
@@ -95,7 +97,7 @@ fn main() {
     for (i, pr) in presets().into_iter().enumerate() {
         let p = &pr.params;
         let pb = p.to_bytes();
-        let w = prover::random_witness(p.depth as usize, 0x5eed + i as u64);
+        let w = prover::random_witness(p.depth as usize, 0x5eed + i as u64, 0x1234_5678_9abc);
         let pi = w.public_inputs().to_bytes();
 
         let t0 = Instant::now();

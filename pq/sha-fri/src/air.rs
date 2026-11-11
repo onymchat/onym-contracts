@@ -1,5 +1,5 @@
-//! Membership AIR: the PQ analogue of `plonk/prover`'s
-//! `MembershipCircuit`.
+//! Membership and update AIRs: the PQ analogues of `plonk/prover`'s
+//! `MembershipCircuit` and `UpdateCircuit`.
 //!
 //! ## Statement
 //!
@@ -14,6 +14,17 @@
 //!
 //! `H` = first 8 lanes of Poseidon2-BabyBear-16. That is `d + 3`
 //! permutations.
+//!
+//! **Update** ([`Kind::Update`]) proves the membership statement above for
+//! `(c_old, epoch_old)` and additionally binds
+//!
+//! ```text
+//!   c_new = H(H(root_new ‖ (epoch_old+1) limbs ‖ 0⁵) ‖ salt_new)
+//! ```
+//!
+//! with `root_new` and `salt_new` private and unconstrained otherwise:
+//! new-tree binding is commitment-only, exactly like the PLONK update
+//! circuit. Public: `c_old`, `epoch_old`, `c_new`. Two more blocks.
 //!
 //! ## Layout: one 32-row block per permutation, one row per round
 //!
@@ -52,6 +63,14 @@
 //! | salt   | 16    | link row of block d+1      | `x − g^(32(d+1)+31)` |
 //! | leaf   | 8     | row 0                      | `x − 1`              |
 //! | commit | 8     | row 32(d+2)+31             | `x − g^(32(d+2)+31)` |
+//!
+//! Update adds three groups:
+//!
+//! | group   | count | vanishes on            | meaning                           |
+//! |---------|-------|------------------------|-----------------------------------|
+//! | epoch2  | 8     | link row of block d+2  | next = root_new ‖ limbs(e+1) ‖ 0⁵ |
+//! | salt2   | 16    | link row of block d+3  | next = cur ‖ sib (sib = salt_new) |
+//! | commit2 | 8     | row 32(d+4)+31         | output lanes 0..8 = c_new         |
 
 use crate::field::{Algebra, F};
 use crate::poseidon2::{self, DIGEST, ROUNDS_EXT_HALF, ROUNDS_INT, WIDTH};
@@ -71,7 +90,32 @@ pub const PER_HOLD: usize = 3;
 pub const PER_RC: usize = 4;
 pub const NUM_PERIODIC: usize = 4 + WIDTH;
 
-pub const NUM_CONSTRAINTS: usize = 16 + 17 + 16 + 16 + 8 + 8;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Membership = 0,
+    Update = 1,
+}
+
+impl Kind {
+    pub fn from_u8(b: u8) -> Option<Kind> {
+        match b {
+            0 => Some(Kind::Membership),
+            1 => Some(Kind::Update),
+            _ => None,
+        }
+    }
+    /// Permutations before padding.
+    fn perms(self, depth: usize) -> usize {
+        match self {
+            Kind::Membership => depth + 3,
+            Kind::Update => depth + 5,
+        }
+    }
+}
+
+pub fn num_constraints(kind: Kind) -> usize {
+    groups(kind).last().unwrap().1
+}
 
 /// Epoch as three 22-bit limbs (covers all of u64).
 pub fn epoch_limbs(epoch: u64) -> [F; 3] {
@@ -82,13 +126,14 @@ pub fn epoch_limbs(epoch: u64) -> [F; 3] {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shape {
     pub depth: usize,
+    pub kind: Kind,
     pub log_blocks: u32,
 }
 
 impl Shape {
-    pub fn new(depth: usize) -> Shape {
-        let blocks = (depth + 3).next_power_of_two();
-        Shape { depth, log_blocks: blocks.trailing_zeros() }
+    pub fn new(depth: usize, kind: Kind) -> Shape {
+        let blocks = kind.perms(depth).next_power_of_two();
+        Shape { depth, kind, log_blocks: blocks.trailing_zeros() }
     }
     pub fn blocks(&self) -> usize {
         1 << self.log_blocks
@@ -104,34 +149,70 @@ impl Shape {
     }
 }
 
+/// Membership: `(commitment, epoch)`. Update: `(c_old, epoch_old, c_new)`
+/// with `commitment = c_old`.
+///
+/// Wire format: `commitment (8 × u32 LE) ‖ epoch (u64 LE) [‖ c_new (8 × u32 LE)]`.
+/// A digest is 32 bytes, so it maps 1:1 onto a contract `BytesN<32>`.
 pub struct PublicInputs {
     pub commitment: [F; DIGEST],
     pub epoch: u64,
+    pub c_new: Option<[F; DIGEST]>,
+}
+
+pub const DIGEST_BYTES: usize = 4 * DIGEST;
+
+pub fn digest_to_bytes(d: &[F; DIGEST]) -> [u8; DIGEST_BYTES] {
+    let mut out = [0u8; DIGEST_BYTES];
+    for i in 0..DIGEST {
+        out[4 * i..4 * i + 4].copy_from_slice(&d[i].value().to_le_bytes());
+    }
+    out
+}
+
+/// `None` unless every limb is canonical.
+pub fn digest_from_bytes(b: &[u8]) -> Option<[F; DIGEST]> {
+    if b.len() != DIGEST_BYTES {
+        return None;
+    }
+    let mut d = [F::ZERO; DIGEST];
+    for i in 0..DIGEST {
+        d[i] = F::from_canonical(u32::from_le_bytes(b[4 * i..4 * i + 4].try_into().unwrap()))?;
+    }
+    Some(d)
 }
 
 impl PublicInputs {
-    pub const BYTES: usize = 4 * DIGEST + 8;
-
-    pub fn to_bytes(&self) -> [u8; Self::BYTES] {
-        let mut out = [0u8; Self::BYTES];
-        for i in 0..DIGEST {
-            out[4 * i..4 * i + 4].copy_from_slice(&self.commitment[i].value().to_le_bytes());
+    pub fn byte_len(kind: Kind) -> usize {
+        match kind {
+            Kind::Membership => DIGEST_BYTES + 8,
+            Kind::Update => 2 * DIGEST_BYTES + 8,
         }
-        out[4 * DIGEST..].copy_from_slice(&self.epoch.to_le_bytes());
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(2 * DIGEST_BYTES + 8);
+        out.extend_from_slice(&digest_to_bytes(&self.commitment));
+        out.extend_from_slice(&self.epoch.to_le_bytes());
+        if let Some(c) = &self.c_new {
+            out.extend_from_slice(&digest_to_bytes(c));
+        }
         out
     }
 
-    pub fn from_bytes(b: &[u8]) -> Option<PublicInputs> {
-        if b.len() != Self::BYTES {
+    pub fn from_bytes(kind: Kind, b: &[u8]) -> Option<PublicInputs> {
+        if b.len() != Self::byte_len(kind) {
             return None;
         }
-        let mut commitment = [F::ZERO; DIGEST];
-        for i in 0..DIGEST {
-            let v = u32::from_le_bytes(b[4 * i..4 * i + 4].try_into().unwrap());
-            commitment[i] = F::from_canonical(v)?;
-        }
-        let epoch = u64::from_le_bytes(b[4 * DIGEST..].try_into().unwrap());
-        Some(PublicInputs { commitment, epoch })
+        let commitment = digest_from_bytes(&b[..DIGEST_BYTES])?;
+        let epoch = u64::from_le_bytes(b[DIGEST_BYTES..DIGEST_BYTES + 8].try_into().unwrap());
+        let c_new = match kind {
+            Kind::Membership => None,
+            // epoch_old + 1 must not wrap.
+            Kind::Update if epoch == u64::MAX => return None,
+            Kind::Update => Some(digest_from_bytes(&b[DIGEST_BYTES + 8..])?),
+        };
+        Some(PublicInputs { commitment, epoch, c_new })
     }
 }
 
@@ -182,7 +263,6 @@ pub fn eval<A: Algebra>(
     pi: &PublicInputs,
     out: &mut Vec<A>,
 ) {
-    let _ = shape;
     out.clear();
     let s: [A; WIDTH] = local[..WIDTH].try_into().unwrap();
     let rc: [A; WIDTH] = per[PER_RC..PER_RC + WIDTH].try_into().unwrap();
@@ -239,25 +319,64 @@ pub fn eval<A: Algebra>(
     for i in 0..DIGEST {
         out.push(s[i] - A::from(pi.commitment[i]));
     }
-    debug_assert_eq!(out.len(), NUM_CONSTRAINTS);
+
+    if shape.kind == Kind::Update {
+        let c_new = pi.c_new.expect("update public inputs carry c_new");
+        // ---- epoch2 link: next = root_new ‖ limbs(epoch+1) ‖ 0⁵ -----
+        let limbs = epoch_limbs(pi.epoch + 1);
+        for i in 0..3 {
+            out.push(next[DIGEST + i] - A::from(limbs[i]));
+        }
+        for i in DIGEST + 3..WIDTH {
+            out.push(next[i]);
+        }
+        // ---- salt2 link ----------------------------------------------
+        for i in 0..DIGEST {
+            out.push(next[i] - s[i]);
+        }
+        for i in 0..DIGEST {
+            out.push(next[DIGEST + i] - sib[i]);
+        }
+        // ---- c_new boundary ------------------------------------------
+        for i in 0..DIGEST {
+            out.push(s[i] - A::from(c_new[i]));
+        }
+    }
+    debug_assert_eq!(out.len(), num_constraints(shape.kind));
 }
 
-/// Group boundaries into the `eval` output, paired with group ids.
-pub const GROUPS: [(usize, usize); 6] = [(0, 16), (16, 33), (33, 49), (49, 65), (65, 73), (73, 81)];
+/// Group boundaries into the `eval` output; index = divisor id.
+const GROUPS_MEMBERSHIP: [(usize, usize); 6] = [(0, 16), (16, 33), (33, 49), (49, 65), (65, 73), (73, 81)];
+const GROUPS_UPDATE: [(usize, usize); 9] =
+    [(0, 16), (16, 33), (33, 49), (49, 65), (65, 73), (73, 81), (81, 89), (89, 105), (105, 113)];
+
+pub fn groups(kind: Kind) -> &'static [(usize, usize)] {
+    match kind {
+        Kind::Membership => &GROUPS_MEMBERSHIP,
+        Kind::Update => &GROUPS_UPDATE,
+    }
+}
+pub const NUM_GROUPS_MAX: usize = 9;
 pub const G_ROUND: usize = 0;
 pub const G_MERKLE: usize = 1;
 pub const G_EPOCH: usize = 2;
 pub const G_SALT: usize = 3;
 pub const G_LEAF: usize = 4;
 pub const G_COMMIT: usize = 5;
+pub const G_EPOCH2: usize = 6;
+pub const G_SALT2: usize = 7;
+pub const G_COMMIT2: usize = 8;
 
 /// Divisor of each group at `x`, given `xⁿ` and the trace generator `g`.
-pub fn divisors<A: Algebra>(shape: &Shape, x: A, x_n: A, g: F) -> [A; 6] {
+/// Update-only slots are `1` for membership (never used).
+pub fn divisors<A: Algebra>(shape: &Shape, x: A, x_n: A, g: F) -> [A; NUM_GROUPS_MAX] {
     let gp = |row: usize| A::from(g.pow(row as u64));
     let mut merkle = A::ONE;
     for b in 0..shape.depth {
         merkle = merkle * (x - gp(shape.link_row(b)));
     }
+    let update = shape.kind == Kind::Update;
+    let at = |block: usize| if update { x - gp(shape.link_row(block)) } else { A::ONE };
     [
         x_n - A::ONE,
         merkle,
@@ -265,16 +384,35 @@ pub fn divisors<A: Algebra>(shape: &Shape, x: A, x_n: A, g: F) -> [A; 6] {
         x - gp(shape.link_row(shape.depth + 1)),
         x - A::ONE,
         x - gp(shape.link_row(shape.depth + 2)),
+        at(shape.depth + 2),
+        at(shape.depth + 3),
+        at(shape.depth + 4),
     ]
 }
 
-/// Witness for one membership proof.
+/// Witness for one membership proof, or the old-tree half of an update.
 pub struct Witness {
     pub sk: [F; DIGEST],
     pub path: Vec<[F; DIGEST]>,
     pub index: usize,
     pub salt: [F; DIGEST],
     pub epoch: u64,
+    /// `Some` for an update: the new commitment's private preimage.
+    pub update: Option<UpdateWitness>,
+}
+
+pub struct UpdateWitness {
+    pub root_new: [F; DIGEST],
+    pub salt_new: [F; DIGEST],
+}
+
+/// `H(H(root ‖ limbs(epoch) ‖ 0⁵) ‖ salt)`.
+pub fn commitment(root: &[F; DIGEST], epoch: u64, salt: &[F; DIGEST]) -> [F; DIGEST] {
+    let mut input = [F::ZERO; WIDTH];
+    input[..DIGEST].copy_from_slice(root);
+    input[DIGEST..DIGEST + 3].copy_from_slice(&epoch_limbs(epoch));
+    let h1: [F; DIGEST] = poseidon2::permute(input)[..DIGEST].try_into().unwrap();
+    poseidon2::compress(&h1, salt)
 }
 
 impl Witness {
@@ -292,18 +430,27 @@ impl Witness {
         cur
     }
 
+    pub fn kind(&self) -> Kind {
+        if self.update.is_some() {
+            Kind::Update
+        } else {
+            Kind::Membership
+        }
+    }
+
     pub fn public_inputs(&self) -> PublicInputs {
-        let mut input = [F::ZERO; WIDTH];
-        input[..DIGEST].copy_from_slice(&self.root());
-        input[DIGEST..DIGEST + 3].copy_from_slice(&epoch_limbs(self.epoch));
-        let h1: [F; DIGEST] = poseidon2::permute(input)[..DIGEST].try_into().unwrap();
-        PublicInputs { commitment: poseidon2::compress(&h1, &self.salt), epoch: self.epoch }
+        PublicInputs {
+            commitment: commitment(&self.root(), self.epoch, &self.salt),
+            epoch: self.epoch,
+            c_new: self.update.as_ref().map(|u| commitment(&u.root_new, self.epoch + 1, &u.salt_new)),
+        }
     }
 
     /// Row-major trace, `n × NUM_COLS`.
     pub fn trace(&self, shape: &Shape) -> Vec<[F; NUM_COLS]> {
         let d = shape.depth;
         assert_eq!(self.path.len(), d);
+        assert_eq!(self.kind(), shape.kind);
         let mut rows = alloc::vec![[F::ZERO; NUM_COLS]; shape.n()];
         let mut input = [F::ZERO; WIDTH];
         input[..DIGEST].copy_from_slice(&self.sk);
@@ -329,8 +476,15 @@ impl Witness {
                 link[COL_SIB..COL_SIB + DIGEST].copy_from_slice(&self.salt);
                 input[..DIGEST].copy_from_slice(&out);
                 input[DIGEST..].copy_from_slice(&self.salt);
+            } else if let (Some(u), true) = (&self.update, b == d + 2) {
+                input[..DIGEST].copy_from_slice(&u.root_new);
+                input[DIGEST..DIGEST + 3].copy_from_slice(&epoch_limbs(self.epoch + 1));
+            } else if let (Some(u), true) = (&self.update, b == d + 3) {
+                link[COL_SIB..COL_SIB + DIGEST].copy_from_slice(&u.salt_new);
+                input[..DIGEST].copy_from_slice(&out);
+                input[DIGEST..].copy_from_slice(&u.salt_new);
             }
-            // b ≥ d+2: next block is padding with a zero input.
+            // Otherwise the next block is padding with a zero input.
         }
         rows
     }

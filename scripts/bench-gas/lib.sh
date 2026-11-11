@@ -136,45 +136,22 @@ bench_gen_proof_hex() { cat "$1/proof.hex"; }
 bench_gen_pi_json()   { cat "$1/public_inputs.json"; }
 bench_gen_commitment_hex() { cat "$1/commitment.hex"; }
 
-# ---------- PQ FRI proof generators ----------
-# Wrappers around the `gen-pq-proof` binary in `pq/prover/`. The PQ
-# orchestrator (`run-pq.sh`) builds the binary and exports
-# `BENCH_PQ_PROVER_BIN`; these helpers shell out to it. Output
-# artefacts share the layout the PLONK helpers above produce
-# (proof.bin / proof.hex / commitment.hex / public_inputs.json) so
-# `bench_gen_proof_hex` etc. work unchanged.
-#
-# Bench-only: the prover produces self-consistent FRI proofs the
-# on-chain verifier accepts but does NOT prove anything about an
-# underlying circuit (no batched-PCS layer yet). Use only for gas
-# measurement.
+# ---------- PQ STARK proof generator ----------
+# Wrapper around `gen-pq-anarchy-bundle` in `pq/sha-fri/`. The PQ
+# orchestrator (`run-pq.sh`) builds it and exports
+# `BENCH_PQ_BUNDLE_BIN`. Proofs are ~39-76 KB, so drivers pass them with
+# `--proof-file-path` (raw bytes) rather than inline hex, which would
+# exceed Linux's 128 KiB per-argument limit.
 
-# bench_gen_pq_membership_proof <commitment_hex_64> <epoch_u64> <out_dir>
-bench_gen_pq_membership_proof() {
-    local commitment_hex="$1"
-    local epoch="$2"
-    local out_dir="$3"
-    mkdir -p "$out_dir"
-    "$BENCH_PQ_PROVER_BIN" \
-        --circuit membership \
-        --commitment "$commitment_hex" \
-        --epoch "$epoch" \
-        --out-dir "$out_dir" >&2
-}
-
-# bench_gen_pq_update_proof <c_old_hex_64> <epoch_old_u64> <c_new_hex_64> <out_dir>
-bench_gen_pq_update_proof() {
-    local c_old_hex="$1"
-    local epoch_old="$2"
-    local c_new_hex="$3"
-    local out_dir="$4"
-    mkdir -p "$out_dir"
-    "$BENCH_PQ_PROVER_BIN" \
-        --circuit update \
-        --commitment "$c_old_hex" \
-        --epoch "$epoch_old" \
-        --new-commitment "$c_new_hex" \
-        --out-dir "$out_dir" >&2
+# bench_gen_pq_anarchy_bundle <depth> <profile: johnson|conjectured> <seed> <out_dir>
+# Chained pq/sep-anarchy create (epoch 0) + update (epoch 0 → 1) STARK
+# bundle; see pq/sha-fri/src/bin/gen_pq_anarchy_bundle.rs for layout.
+bench_gen_pq_anarchy_bundle() {
+    "$BENCH_PQ_BUNDLE_BIN" \
+        --depth "$1" \
+        --profile "$2" \
+        --seed "$3" \
+        --out-dir "$4" >&2
 }
 
 # ---------- invocation + fee capture ----------
@@ -470,14 +447,14 @@ rpc_simulate() {
         -- "$fn" "$@" 2>/dev/null)" || return 0
     [ -n "$tx_xdr" ] || return 0
 
-    local payload
-    payload="$(jq -nc --arg tx "$tx_xdr" \
-        '{jsonrpc:"2.0",id:1,method:"simulateTransaction",params:{transaction:$tx}}')"
-
+    # Payload goes through stdin, not argv: PQ proofs make the tx XDR
+    # ~100 KB of base64, close to Linux's 128 KiB per-argument limit.
     local resp
-    resp="$(curl -sS -X POST -H 'Content-Type: application/json' \
-        --max-time 20 \
-        -d "$payload" "$url" 2>/dev/null)" || return 0
+    resp="$(printf '%s' "$tx_xdr" \
+        | jq -Rsc '{jsonrpc:"2.0",id:1,method:"simulateTransaction",params:{transaction:.}}' \
+        | curl -sS -X POST -H 'Content-Type: application/json' \
+            --max-time 20 \
+            -d @- "$url" 2>/dev/null)" || return 0
     [ -n "$resp" ] || return 0
     printf '%s' "$resp" | jq -e . >/dev/null 2>&1 || return 0
     printf '%s' "$resp"

@@ -69,22 +69,23 @@ stellar keys fund "$BENCH_DEPLOYER" \
     --network "$BENCH_NETWORK" >/dev/null 2>&1 || \
     echo "    (friendbot returned non-zero; proceeding — account may already be funded)"
 
-echo "==> building pq/sep-anarchy"
-mkdir -p "$BENCH_ARTIFACT_DIR"
+echo "==> building pq/sep-anarchy (default + conjectured profiles)"
+mkdir -p "$BENCH_ARTIFACT_DIR/conjectured"
 stellar contract build \
     --manifest-path "$REPO_ROOT/pq/sep-anarchy/Cargo.toml" \
     --out-dir "$BENCH_ARTIFACT_DIR" >/dev/null
+stellar contract build \
+    --manifest-path "$REPO_ROOT/pq/sep-anarchy/Cargo.toml" \
+    --features conjectured \
+    --out-dir "$BENCH_ARTIFACT_DIR/conjectured" >/dev/null
 
-# Off-chain prover binary used by `pq-sep-anarchy.sh` to generate
-# real FRI proofs for `create_group` / `verify_membership` /
-# `update_commitment`. Bench-only (no PCS layer; see prover crate
-# docs).
-echo "==> building gen-pq-proof"
+echo "==> building gen-pq-anarchy-bundle"
 cargo build \
-    --manifest-path "$REPO_ROOT/pq/prover/Cargo.toml" \
+    --manifest-path "$REPO_ROOT/pq/sha-fri/Cargo.toml" \
     --release \
-    --bin gen-pq-proof >/dev/null
-export BENCH_PQ_PROVER_BIN="$REPO_ROOT/pq/prover/target/release/gen-pq-proof"
+    --features prover \
+    --bin gen-pq-anarchy-bundle >/dev/null
+export BENCH_PQ_BUNDLE_BIN="$REPO_ROOT/pq/sha-fri/target/release/gen-pq-anarchy-bundle"
 
 echo "==> setup complete"
 

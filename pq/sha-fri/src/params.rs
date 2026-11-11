@@ -17,19 +17,20 @@
 //!
 //! ## Wire format
 //!
-//! `[version=1, depth, mask_degree: u16 LE, log_blowup,
+//! `[version=2, kind, depth, mask_degree: u16 LE, log_blowup,
 //!   num_queries: u16 LE, grind_bits, cap_height, k, log_arities[k]]`
 
-use crate::air::{Shape, BLOCK};
+use crate::air::{Kind, Shape, BLOCK};
 use alloc::vec::Vec;
 
-const VERSION: u8 = 1;
-const HEADER_LEN: usize = 10;
+const VERSION: u8 = 2;
+const HEADER_LEN: usize = 11;
 const MAX_LOG_ARITY: u8 = 4;
 const MAX_DEPTH: u8 = 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Params {
+    pub kind: Kind,
     pub depth: u8,
     pub mask_degree: u16,
     pub log_blowup: u8,
@@ -46,6 +47,7 @@ impl Params {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(HEADER_LEN + self.log_arities.len());
         out.push(VERSION);
+        out.push(self.kind as u8);
         out.push(self.depth);
         out.extend_from_slice(&self.mask_degree.to_le_bytes());
         out.push(self.log_blowup);
@@ -61,17 +63,18 @@ impl Params {
         if b.len() < HEADER_LEN || b[0] != VERSION {
             return Err(BadParams);
         }
-        let k = b[9] as usize;
+        let k = b[10] as usize;
         if b.len() != HEADER_LEN + k {
             return Err(BadParams);
         }
         let p = Params {
-            depth: b[1],
-            mask_degree: u16::from_le_bytes([b[2], b[3]]),
-            log_blowup: b[4],
-            num_queries: u16::from_le_bytes([b[5], b[6]]),
-            grind_bits: b[7],
-            cap_height: b[8],
+            kind: Kind::from_u8(b[1]).ok_or(BadParams)?,
+            depth: b[2],
+            mask_degree: u16::from_le_bytes([b[3], b[4]]),
+            log_blowup: b[5],
+            num_queries: u16::from_le_bytes([b[6], b[7]]),
+            grind_bits: b[8],
+            cap_height: b[9],
             log_arities: b[HEADER_LEN..].to_vec(),
         };
         p.validate()?;
@@ -105,7 +108,7 @@ impl Params {
     }
 
     pub fn shape(&self) -> Shape {
-        Shape::new(self.depth as usize)
+        Shape::new(self.depth as usize, self.kind)
     }
 
     pub fn n(&self) -> usize {
@@ -181,4 +184,46 @@ impl Params {
     pub fn johnson_security_bits(&self) -> u32 {
         self.num_queries as u32 * self.log_blowup as u32 / 2 + self.grind_bits as u32
     }
+}
+
+/// Security profile for a deployment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    /// ~100 bits counting half of `log₂(blowup)` per query (Johnson-bound
+    /// regime) plus 20 grinding bits: 40 queries at blowup 16.
+    Johnson100,
+    /// ~100 bits under the up-to-capacity proximity-gap conjecture:
+    /// 20 queries at blowup 16 plus 20 grinding bits.
+    Conjectured100,
+}
+
+/// The parameters a deployed contract pins for `(kind, depth)`. Single
+/// source of truth for the contract and the prover.
+pub fn deployment_params(kind: Kind, depth: u8, profile: Profile) -> Params {
+    let num_queries: u16 = match profile {
+        Profile::Johnson100 => 40,
+        Profile::Conjectured100 => 20,
+    };
+    let log_blowup = 4u8;
+    let mut p = Params {
+        kind,
+        depth,
+        // Hiding: covers num_queries × 2 coset points + 2 OOD points.
+        mask_degree: num_queries * 2 + 2,
+        log_blowup,
+        num_queries,
+        grind_bits: 20,
+        cap_height: 4,
+        log_arities: Vec::new(),
+    };
+    // Arity 2 at layer 0 (trace rows per leaf), then 8 until the final
+    // polynomial is a constant.
+    let mut rem = p.log_n0() - 1 - log_blowup as u32;
+    p.log_arities.push(1);
+    while rem > 0 {
+        let a = rem.min(3);
+        p.log_arities.push(a as u8);
+        rem -= a;
+    }
+    p
 }
