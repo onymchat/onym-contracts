@@ -1,0 +1,17 @@
+[package]
+name = "pq-sha-fri-runner"
+version = "0.1.0"
+edition = "2021"
+description = "Feasibility bench for the sha-fri prototype: proves at several parameter presets, verifies natively, then invokes the compiled pq-sha-fri-bench WASM under the soroban-sdk 26 metered host and reports CPU / memory / proof size against the network caps."
+license = "MIT"
+publish = false
+
+[dependencies]
+sha-fri = { path = "../sha-fri", features = ["prover"] }
+# testutils: registers the contract WASM in a local host with the
+# production cost model, so CPU/memory come from the real VM metering.
+soroban-sdk = { version = "=26.0.0", features = ["testutils"] }
+
+[profile.release]
+opt-level = 3
+lto = true
