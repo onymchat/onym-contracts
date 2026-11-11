@@ -1,8 +1,9 @@
 name: Bench gas (testnet)
 
-# Manual-dispatch testnet gas bench for any subset of the PLONK
-# contracts, without cutting a release. Same driver as release.yml's
-# bench-gas job (scripts/bench-gas/run.sh): deploys fresh contracts to
+# Manual-dispatch testnet gas bench for any subset of the contracts,
+# without cutting a release. Same drivers as release.yml's bench-gas job
+# (scripts/bench-gas/run.sh) and release_pq.yml (run-pq.sh for
+# `pq-sep-anarchy`, which deploys both PQ security profiles): deploys fresh contracts to
 # Stellar testnet, submits real transactions, and captures per-op fees,
 # CPU instructions and memory. Differences from release.yml:
 #   * no tag / release required; benches any ref,
@@ -11,6 +12,7 @@ name: Bench gas (testnet)
 #     body or the contracts manifest.
 #
 #   gh workflow run bench_testnet.yml -f contracts=sep-tyranny
+#   gh workflow run bench_testnet.yml -f contracts=pq-sep-anarchy
 #
 # Third-party `uses:` are pinned to commit SHA (version tag in a
 # trailing comment), same posture as release.yml.
@@ -19,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       contracts:
-        description: 'Space-separated contracts to bench (sep-anarchy sep-democracy sep-oligarchy sep-oneonone sep-tyranny)'
+        description: 'Space-separated contracts to bench (sep-anarchy sep-democracy sep-oligarchy sep-oneonone sep-tyranny pq-sep-anarchy)'
         required: false
         default: 'sep-tyranny'
         type: string
@@ -47,17 +49,21 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Validate contract list
+      - name: Validate + split contract list
         env:
           CONTRACTS: ${{ inputs.contracts }}
         run: |
           set -euo pipefail
+          plonk=""; pq=""
           for c in $CONTRACTS; do
             case "$c" in
-              sep-anarchy|sep-democracy|sep-oligarchy|sep-oneonone|sep-tyranny) ;;
+              sep-anarchy|sep-democracy|sep-oligarchy|sep-oneonone|sep-tyranny) plonk="$plonk $c" ;;
+              pq-sep-anarchy) pq="$pq $c" ;;
               *) echo "::error::unknown contract '$c'"; exit 1 ;;
             esac
           done
+          echo "PLONK_CONTRACTS=${plonk# }" >> "$GITHUB_ENV"
+          echo "PQ_CONTRACTS=${pq# }" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
@@ -72,7 +78,8 @@ jobs:
             ~/.cargo/git
             plonk/prover/target
             plonk/*/target
-          key: bench-testnet-rust-${{ hashFiles('plonk/**/Cargo.toml', 'plonk/**/Cargo.lock') }}
+            pq/*/target
+          key: bench-testnet-rust-${{ hashFiles('plonk/**/Cargo.toml', 'plonk/**/Cargo.lock', 'pq/**/Cargo.toml', 'pq/**/Cargo.lock') }}
 
       - name: Install stellar CLI
         env:
@@ -99,38 +106,55 @@ jobs:
             --rpc-url https://soroban-testnet.stellar.org \
             --network-passphrase "Test SDF Network ; September 2015" || true
 
-      - name: Run gas benchmarks
+      - name: Run PLONK gas benchmarks
+        if: env.PLONK_CONTRACTS != ''
         env:
           BENCH_NETWORK: testnet
           BENCH_TAG: ${{ inputs.ref || github.ref_name }}
-          CONTRACTS: ${{ inputs.contracts }}
         run: |
           set -euo pipefail
           chmod +x scripts/bench-gas/run.sh \
                    scripts/bench-gas/setup.sh \
                    scripts/bench-gas/contracts/*.sh
           # shellcheck disable=SC2086  # word-split the contract list
-          bash scripts/bench-gas/run.sh $CONTRACTS
+          bash scripts/bench-gas/run.sh $PLONK_CONTRACTS
+
+      - name: Run PQ gas benchmarks
+        if: env.PQ_CONTRACTS != ''
+        env:
+          BENCH_NETWORK: testnet
+          BENCH_TAG: ${{ inputs.ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/bench-gas/run-pq.sh scripts/bench-gas/contracts/*.sh
+          # shellcheck disable=SC2086
+          bash scripts/bench-gas/run-pq.sh $PQ_CONTRACTS
 
       - name: Fail if any op produced no fee data
-        # run.sh keeps going when a driver errors, so check the rows: an
+        # The drivers keep going when an op errors, so check the rows: an
         # op row without fee data means the tx was rejected.
         run: |
           set -euo pipefail
-          missing="$(jq -r 'select(.row_type == "op" and (.fee_stroops == null)) | "\(.contract) \(.op) tier=\(.tier)"' \
-            scripts/bench-gas/results.jsonl)"
+          missing=""
+          for f in scripts/bench-gas/results.jsonl scripts/bench-gas/results-pq.jsonl; do
+            [ -f "$f" ] || continue
+            missing="$missing$(jq -r 'select(.row_type == "op" and (.fee_stroops == null)) | "\(.contract) \(.op) tier=\(.tier)\n"' "$f")"
+          done
           if [ -n "$missing" ]; then
             echo "::error::ops without fee data (rejected or not submitted):"
-            echo "$missing"
+            printf '%b' "$missing"
             exit 1
           fi
 
       - name: Publish results to job summary
         if: always()
         run: |
-          if [ -f scripts/bench-gas/results.md ]; then
-            cat scripts/bench-gas/results.md >> "$GITHUB_STEP_SUMMARY"
-          fi
+          for f in scripts/bench-gas/results.md scripts/bench-gas/results-pq.md; do
+            if [ -f "$f" ]; then
+              cat "$f" >> "$GITHUB_STEP_SUMMARY"
+              echo >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
 
       - name: Upload bench artefacts (JSONL + rendered body)
         if: always()
@@ -140,4 +164,6 @@ jobs:
           path: |
             scripts/bench-gas/results.md
             scripts/bench-gas/results.jsonl
+            scripts/bench-gas/results-pq.md
+            scripts/bench-gas/results-pq.jsonl
           if-no-files-found: warn

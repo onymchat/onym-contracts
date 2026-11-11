@@ -1,32 +1,27 @@
-//! SEP Anarchy Soroban Contract — PQ flavor (FRI / BN254).
+//! SEP Anarchy Soroban Contract — PQ flavor (SHA-256 STARK).
 //!
 //! Mirrors `plonk/sep-anarchy/src/lib.rs` shape-for-shape:
 //! - same `DataKey`, `Error`, `CommitmentEntry`, event types,
 //! - same `create_group` / `update_commitment` / `verify_membership`
-//!   entrypoints,
+//!   entrypoints and public-input order,
 //! - same global-nullifier replay protection (SHA-256 of proof bytes),
-//! - same per-tier VK lookup,
-//! - same restricted-mode + admin model.
+//! - same per-tier verifier selection, restricted-mode + admin model.
 //!
 //! Differences vs. PLONK flavor:
-//! - Verifier reaches into `env.crypto_hazmat().poseidon2_permutation`
-//!   (Soroban Protocol 26+ host primitive) with vendored Horizen
-//!   Labs canonical Poseidon2-BN254-t3 constants, instead of the
-//!   BLS12-381 pairing primitive.
-//! - Field is BN254 Fr — same byte width as the PLONK flavor's
-//!   BLS12-381 Fr (32 bytes BE), so PI shape is unchanged at the
-//!   client API surface.
-//! - Proof bytes are variable-length `Bytes` (FRI proofs scale with
-//!   query count × layer count × Merkle path depth).
+//! - Proofs are zero-knowledge STARKs verified by `pq/sha-fri`:
+//!   Poseidon2-BabyBear-16 membership / update AIRs, SHA-256 Merkle
+//!   commitments + Fiat–Shamir through the `sha256` host function,
+//!   FRI. No pairing, no trusted setup; security rests on hashes only.
+//! - Proof bytes are variable-length `Bytes` (~39 KB or ~76 KB depending
+//!   on the security profile, see `PROFILE`).
+//! - A commitment `BytesN<32>` is a Poseidon2 digest: 8 BabyBear limbs,
+//!   each a canonical little-endian `u32`. Epoch public inputs stay
+//!   32-byte big-endian `u64`, as in the PLONK flavor.
 //!
 //! ## Status
 //!
-//! **Phase 1 (crypto primitives) only.** The verifier today runs
-//! the FRI low-degree test using audited host primitives — this
-//! gives correct cryptographic foundations but does NOT yet check
-//! AIR constraints. The batched-PCS layer that ties FRI to a
-//! constraint system is the gating dependency for production
-//! deployment; do not deploy this contract without it.
+//! Prototype. Poseidon2 round constants are not Plonky3's canonical set
+//! and the code is unaudited; see `pq/sha-fri/README.md`.
 
 #![no_std]
 
@@ -35,12 +30,12 @@ use alloc::vec::Vec as AllocVec;
 
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype,
-    Address, Bytes, BytesN, Env, Vec,
+    Address, Bytes, BytesN, Env, IntoVal, Vec,
 };
 
-use fri_verifier::field;
-use fri_verifier::verifier::verify as fri_verify;
-use fri_verifier::vk_format::VK_LEN;
+use sha_fri::air::{digest_from_bytes, Kind};
+use sha_fri::hash::{Digest, Hasher};
+use sha_fri::params::{deployment_params, Profile};
 
 // ================================================================
 // Constants
@@ -52,136 +47,31 @@ const LEDGER_BUMP: u32 = 518_400;
 const MAX_GROUPS_PER_TIER: u32 = 10_000;
 
 /// Membership-circuit public inputs: `(commitment, epoch)`.
-/// Each PI is one BN254 Fr (32 bytes BE) — same convention as the
-/// PLONK flavor's BLS12-381 Fr PIs, so client code is symmetric.
 const MEMBERSHIP_PI_COUNT: u32 = 2;
 /// Update-circuit public inputs: `(c_old, epoch_old, c_new)`.
 const UPDATE_PI_COUNT: u32 = 3;
 
-/// Hard cap on accepted proof size. Bench params produce ~10 KB
-/// proofs; production parameters (log_n≥20, ~80 queries) push
-/// proofs into the hundreds of KB. The cap below allows up to
-/// 256 KB — generous for bench, tighten before production.
-const MAX_PROOF_BYTES: u32 = 256 * 1024;
+/// Hard cap on accepted proof size: the largest honest proof is ~76 KB
+/// and a Soroban transaction is capped at 132 KB anyway.
+const MAX_PROOF_BYTES: u32 = 128 * 1024;
 
-#[cfg(test)]
-fn tier_capacity(tier: u32) -> u32 {
+/// Security profile baked into this build (see `sha_fri::params::Profile`).
+/// Default: ~100 bits in the conservative Johnson regime. The
+/// `conjectured` feature builds the ~100-bit-conjectured variant with
+/// half the queries and roughly half the proof size.
+#[cfg(not(feature = "conjectured"))]
+const PROFILE: Profile = Profile::Johnson100;
+#[cfg(feature = "conjectured")]
+const PROFILE: Profile = Profile::Conjectured100;
+
+fn tier_depth(tier: u32) -> Option<u8> {
     match tier {
-        0 => 32,
-        1 => 256,
-        2 => 2048,
-        _ => 0,
-    }
-}
-
-// ================================================================
-// Embedded baked VKs
-// ================================================================
-//
-// Bench-scale verifying keys (log_n=6, num_layers=3, num_queries=8,
-// blowup=2). The Phase 2 follow-up swaps these for circuit-bound
-// VKs once the AIR + batched-PCS layer lands. Until then the
-// `pcs_pinned_root` field below is a placeholder pattern, NOT a
-// real preprocessed-trace commitment.
-
-/// VK byte width (defined by `fri_verifier::vk_format::VK_LEN`):
-/// 5 × u32 header + 4 × 32B BN254 Fr = 148 bytes.
-const VK_FILE_LEN: usize = VK_LEN;
-
-/// `omega_0` for our log_n=6 domain — primitive 64-th root of unity
-/// in BN254: `5^((r-1)/64) mod r`.
-const OMEGA_0_BE: [u8; 32] = [
-    0x14, 0x18, 0x14, 0x4d, 0x5b, 0x08, 0x0f, 0xca,
-    0xc2, 0x4c, 0xdb, 0x76, 0x49, 0xbd, 0xad, 0xf2,
-    0x46, 0xa6, 0xcb, 0x24, 0x26, 0xe3, 0x24, 0xbe,
-    0xdb, 0x94, 0xfb, 0x05, 0x11, 0x8f, 0x02, 0x3a,
-];
-/// `omega_0^{-1} mod r`.
-const OMEGA_0_INV_BE: [u8; 32] = [
-    0x26, 0x17, 0x7c, 0xf2, 0xb2, 0xa1, 0x3d, 0x3a,
-    0x03, 0x5c, 0xdc, 0x75, 0x67, 0xa8, 0xa6, 0x76,
-    0xd8, 0x03, 0x96, 0xec, 0x1d, 0x32, 0x13, 0xee,
-    0x78, 0xce, 0x6a, 0x0b, 0x76, 0x3d, 0x69, 0x8f,
-];
-/// `2^{-1} mod r = (r+1)/2`.
-const TWO_INV_BE: [u8; 32] = [
-    0x18, 0x32, 0x27, 0x39, 0x70, 0x98, 0xd0, 0x14,
-    0xdc, 0x28, 0x22, 0xdb, 0x40, 0xc0, 0xac, 0x2e,
-    0x94, 0x19, 0xf4, 0x24, 0x3c, 0xdc, 0xb8, 0x48,
-    0xa1, 0xf0, 0xfa, 0xc9, 0xf8, 0x00, 0x00, 0x01,
-];
-
-/// `pcs_pinned_root` placeholder — single BN254 Fr (= 32 bytes).
-/// Production VKs carry the prover-baked Merkle root of the AIR's
-/// preprocessed trace columns, distinct per circuit.
-const PCS_PINNED_ROOT_BE: [u8; 32] = [
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-    0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-    0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
-];
-
-const MEMBERSHIP_VK_BYTES: [u8; VK_FILE_LEN] = build_vk_bytes(MEMBERSHIP_PI_COUNT);
-const UPDATE_VK_BYTES: [u8; VK_FILE_LEN] = build_vk_bytes(UPDATE_PI_COUNT);
-
-const VK_D5: &[u8] = &MEMBERSHIP_VK_BYTES;
-const VK_D8: &[u8] = &MEMBERSHIP_VK_BYTES;
-const VK_D11: &[u8] = &MEMBERSHIP_VK_BYTES;
-
-const UPDATE_VK_D5: &[u8] = &UPDATE_VK_BYTES;
-const UPDATE_VK_D8: &[u8] = &UPDATE_VK_BYTES;
-const UPDATE_VK_D11: &[u8] = &UPDATE_VK_BYTES;
-
-const fn build_vk_bytes(num_pi: u32) -> [u8; VK_FILE_LEN] {
-    let mut b = [0u8; VK_FILE_LEN];
-    // log_n = 6 → initial domain size 64.
-    b[0] = 6;
-    // num_layers = 3 → final layer size 8.
-    b[4] = 3;
-    // num_queries = 8.
-    b[8] = 8;
-    // num_pi: per-circuit BN254 Fr count (= number of `BytesN<32>`
-    // public inputs at the contract surface).
-    let pi = num_pi.to_le_bytes();
-    b[12] = pi[0];
-    b[13] = pi[1];
-    b[14] = pi[2];
-    b[15] = pi[3];
-    // blowup_log = 1 (rate 1/2).
-    b[16] = 1;
-    // pcs_pinned_root: 32 BE bytes at offset 20..52.
-    let mut i = 0;
-    while i < 32 {
-        b[20 + i] = PCS_PINNED_ROOT_BE[i];
-        b[52 + i] = OMEGA_0_BE[i];
-        b[84 + i] = OMEGA_0_INV_BE[i];
-        b[116 + i] = TWO_INV_BE[i];
-        i += 1;
-    }
-    b
-}
-
-fn membership_vk_for_tier(tier: u32) -> Option<&'static [u8]> {
-    match tier {
-        0 => Some(VK_D5),
-        1 => Some(VK_D8),
-        2 => Some(VK_D11),
+        0 => Some(5),
+        1 => Some(8),
+        2 => Some(11),
         _ => None,
     }
 }
-
-fn update_vk_for_tier(tier: u32) -> Option<&'static [u8]> {
-    match tier {
-        0 => Some(UPDATE_VK_D5),
-        1 => Some(UPDATE_VK_D8),
-        2 => Some(UPDATE_VK_D11),
-        _ => None,
-    }
-}
-
-// ================================================================
-// Errors
-// ================================================================
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -247,7 +137,7 @@ pub struct RestrictedModeChanged {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitmentEntry {
-    /// Group commitment — single BN254 Fr (32 bytes BE).
+    /// Group commitment — Poseidon2-BabyBear digest (8 × u32 LE).
     pub commitment: BytesN<32>,
     pub epoch: u64,
     pub timestamp: u64,
@@ -335,7 +225,15 @@ impl PqSepAnarchyContract {
         public_inputs: Vec<BytesN<32>>,
     ) -> Result<(), Error> {
         Self::require_initialized(&env)?;
-        caller.require_auth();
+        // Authorize everything except the proof. Plain `require_auth()`
+        // copies every argument into the auth entry, so the ~70-76 KB
+        // proof would ride in the transaction twice and break the
+        // 132 KB tx limit. The proof needs no signature: verification
+        // binds it to `commitment`, and replay protection pins it to
+        // one use.
+        caller.require_auth_for_args(
+            (group_id.clone(), commitment.clone(), tier, member_count).into_val(&env),
+        );
 
         let restricted: bool = env
             .storage()
@@ -356,7 +254,7 @@ impl PqSepAnarchyContract {
         if tier > 2 {
             return Err(Error::InvalidTier);
         }
-        if !is_canonical_pi(&env, &commitment) {
+        if !is_canonical_digest(&commitment) {
             return Err(Error::InvalidCommitmentEncoding);
         }
         if public_inputs.len() != MEMBERSHIP_PI_COUNT {
@@ -386,8 +284,7 @@ impl PqSepAnarchyContract {
 
         Self::check_proof_replay(&env, &proof)?;
 
-        let vk_bytes = membership_vk_for_tier(tier).ok_or(Error::InvalidTier)?;
-        verify_fri_proof(&env, vk_bytes, &proof, &public_inputs)?;
+        verify_stark(&env, Kind::Membership, tier, &proof, &public_inputs, 0)?;
 
         Self::record_proof(&env, &proof);
 
@@ -452,7 +349,7 @@ impl PqSepAnarchyContract {
         if epoch_old_be != be32_from_u64(&env, current.epoch) {
             return Err(Error::PublicInputsMismatch);
         }
-        if !is_canonical_pi(&env, &c_new) {
+        if !is_canonical_digest(&c_new) {
             return Err(Error::InvalidCommitmentEncoding);
         }
         if proof.len() > MAX_PROOF_BYTES {
@@ -461,8 +358,7 @@ impl PqSepAnarchyContract {
 
         Self::check_proof_replay(&env, &proof)?;
 
-        let vk_bytes = update_vk_for_tier(current.tier).ok_or(Error::InvalidTier)?;
-        verify_fri_proof(&env, vk_bytes, &proof, &public_inputs)?;
+        verify_stark(&env, Kind::Update, current.tier, &proof, &public_inputs, current.epoch)?;
 
         Self::record_proof(&env, &proof);
 
@@ -514,8 +410,7 @@ impl PqSepAnarchyContract {
             return Err(Error::ProofTooLarge);
         }
 
-        let vk_bytes = membership_vk_for_tier(state.tier).ok_or(Error::InvalidTier)?;
-        match verify_fri_proof(&env, vk_bytes, &proof, &public_inputs) {
+        match verify_stark(&env, Kind::Membership, state.tier, &proof, &public_inputs, state.epoch) {
             Ok(()) => Ok(true),
             Err(Error::InvalidProof) => Ok(false),
             Err(other) => Err(other),
@@ -647,39 +542,46 @@ impl PqSepAnarchyContract {
 }
 
 // ================================================================
-// FRI verification glue
+// STARK verification glue
 // ================================================================
 
-/// Decode `proof: Bytes` to a heap-allocated `Vec<u8>`, copy each
-/// `BytesN<32>` PI into a `[u8; 32]` slot, and hand off to the
-/// verifier crate.
-fn verify_fri_proof(
-    env: &Env,
-    vk_bytes: &[u8],
-    proof: &Bytes,
-    public_inputs: &Vec<BytesN<32>>,
-) -> Result<(), Error> {
-    // Bytes → Vec<u8>.
-    let mut proof_vec: AllocVec<u8> = AllocVec::with_capacity(proof.len() as usize);
-    for b in proof.iter() {
-        proof_vec.push(b);
-    }
+/// Every hash the verifier asks for becomes one `sha256` host call.
+struct HostSha256<'a>(&'a Env);
 
-    // Pack PIs into a fixed-size buffer (max = update circuit's 3 PIs).
-    let pi_count = public_inputs.len() as usize;
-    if pi_count > MAX_VERIFIER_PI {
-        return Err(Error::PublicInputsMismatch);
+impl Hasher for HostSha256<'_> {
+    fn hash_parts(&self, parts: &[&[u8]]) -> Digest {
+        let mut buf = AllocVec::with_capacity(parts.iter().map(|p| p.len()).sum());
+        for p in parts {
+            buf.extend_from_slice(p);
+        }
+        self.0.crypto().sha256(&Bytes::from_slice(self.0, &buf)).to_array()
     }
-    let mut pi_buf: [[u8; 32]; MAX_VERIFIER_PI] = [[0u8; 32]; MAX_VERIFIER_PI];
-    for i in 0..pi_count {
-        pi_buf[i] = public_inputs.get(i as u32).unwrap().to_array();
-    }
-
-    fri_verify(env, vk_bytes, &proof_vec, &pi_buf[..pi_count])
-        .map_err(|_| Error::InvalidProof)
 }
 
-const MAX_VERIFIER_PI: usize = UPDATE_PI_COUNT as usize;
+/// Translate the contract-level PIs (`BytesN<32>` digests, 32-byte BE
+/// epoch) into the verifier's wire format and verify against the
+/// deployment parameters for `(kind, tier)`.
+fn verify_stark(
+    env: &Env,
+    kind: Kind,
+    tier: u32,
+    proof: &Bytes,
+    public_inputs: &Vec<BytesN<32>>,
+    epoch: u64,
+) -> Result<(), Error> {
+    let depth = tier_depth(tier).ok_or(Error::InvalidTier)?;
+    let params = deployment_params(kind, depth, PROFILE).to_bytes();
+
+    let mut pi = AllocVec::with_capacity(72);
+    pi.extend_from_slice(&public_inputs.get(0).unwrap().to_array());
+    pi.extend_from_slice(&epoch.to_le_bytes());
+    if kind == Kind::Update {
+        pi.extend_from_slice(&public_inputs.get(2).unwrap().to_array());
+    }
+
+    sha_fri::verifier::verify(&HostSha256(env), &params, &proof.to_alloc_vec(), &pi)
+        .map_err(|_| Error::InvalidProof)
+}
 
 // ================================================================
 // Encoding helpers
@@ -692,19 +594,11 @@ fn be32_from_u64(env: &Env, value: u64) -> BytesN<32> {
     BytesN::from_array(env, &bytes)
 }
 
-/// Each PI (commitment / epoch / etc.) must be a canonical BN254 Fr.
-/// Reject any byte sequence ≥ r at the contract surface so the
-/// verifier can assume canonical inputs throughout.
-fn is_canonical_pi(env: &Env, value: &BytesN<32>) -> bool {
-    field::is_canonical_be(env, &value.to_array())
+/// A commitment must be a canonical Poseidon2-BabyBear digest: eight
+/// little-endian `u32` limbs, each below the BabyBear modulus.
+fn is_canonical_digest(value: &BytesN<32>) -> bool {
+    digest_from_bytes(&value.to_array()).is_some()
 }
 
-// Cross-check at compile time that the verifier-crate constants
-// haven't drifted out from under the contract.
-const _: () = {
-    assert!(VK_LEN == 148, "fri_verifier::vk_format::VK_LEN drifted");
-    assert!(
-        MEMBERSHIP_PI_COUNT < UPDATE_PI_COUNT,
-        "membership PI count must be smaller than update PI count"
-    );
-};
+#[cfg(test)]
+mod test;

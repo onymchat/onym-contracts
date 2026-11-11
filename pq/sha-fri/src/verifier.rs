@@ -121,20 +121,19 @@ pub fn combine_constraints<A: Algebra>(
     shape: &Shape,
     numerators: &[A],
     alpha_pows: &[E],
-    divisor_invs: &[A; 6],
+    divisor_invs: &[A; air::NUM_GROUPS_MAX],
 ) -> E
 where
     E: From<A>,
 {
     let mut total = E::ZERO;
-    for (g, &(start, end)) in air::GROUPS.iter().enumerate() {
+    for (g, &(start, end)) in air::groups(shape.kind).iter().enumerate() {
         let mut acc = E::ZERO;
         for i in start..end {
             acc = acc + alpha_pows[i] * E::from(numerators[i]);
         }
         total = total + acc * E::from(divisor_invs[g]);
     }
-    let _ = shape;
     total
 }
 
@@ -156,12 +155,13 @@ pub fn air_check_at_z(
     let y = pow_e(z, shape.blocks() as u64);
     let per: Vec<E> = periodic_coeffs().iter().map(|c| eval_base(c, y)).collect();
 
-    let mut numerators = Vec::with_capacity(air::NUM_CONSTRAINTS);
+    let count = air::num_constraints(shape.kind);
+    let mut numerators = Vec::with_capacity(count);
     air::eval(&shape, ood_z, ood_gz, &per, pi, &mut numerators);
 
-    let mut alpha_pows = Vec::with_capacity(air::NUM_CONSTRAINTS);
+    let mut alpha_pows = Vec::with_capacity(count);
     let mut a = E::ONE;
-    for _ in 0..air::NUM_CONSTRAINTS {
+    for _ in 0..count {
         alpha_pows.push(a);
         a = a * alpha;
     }
@@ -247,7 +247,7 @@ pub fn verify<H: Hasher>(
     public_inputs: &[u8],
 ) -> Result<(), VerifyError> {
     let p = Params::from_bytes(params_bytes).map_err(|_| VerifyError::BadParams)?;
-    let pi = PublicInputs::from_bytes(public_inputs).ok_or(VerifyError::BadPublicInputs)?;
+    let pi = PublicInputs::from_bytes(p.kind, public_inputs).ok_or(VerifyError::BadPublicInputs)?;
     let k = p.num_layers();
     let qcols = p.quotient_cols();
     let chunk_cols = 4 * p.num_quotient_chunks();

@@ -17,9 +17,11 @@ commitments** (about 8.4K CPU per host call) instead.
   pq/sha-fri-runner/   proves random members, runs the WASM under metering
 ```
 
-## Statement
+## Statements
 
-The PQ analogue of `plonk/prover`'s `MembershipCircuit`:
+The PQ analogues of `plonk/prover`'s `MembershipCircuit` and
+`UpdateCircuit`. **Membership** (used by `create_group` and
+`verify_membership`):
 
 ```
   public:  commitment (8 × BabyBear), epoch (u64)
@@ -29,6 +31,25 @@ The PQ analogue of `plonk/prover`'s `MembershipCircuit`:
   root       = MerkleOpen(leaf, path, bits)          (root stays private)
   commitment = H(H(root ‖ epoch limbs ‖ 0⁵) ‖ salt)
 ```
+
+**Update** (`update_commitment`): the membership statement for
+`(c_old, epoch_old)`, plus `c_new = H(H(root_new ‖ (epoch_old+1) limbs) ‖
+salt_new)` with `root_new` and `salt_new` private. As in the PLONK
+circuit, new-tree binding is commitment-only. Two more Poseidon2 blocks,
+so the trace is 512 rows at every tier.
+
+## Deployment
+
+`pq/sep-anarchy` verifies these proofs on-chain. `params::deployment_params`
+is the single source of the per-tier parameters for both the contract
+and the prover, with two profiles:
+
+- **`Johnson100`** (default build): 40 queries, ~70-76 KB proofs.
+- **`Conjectured100`** (`--features conjectured`): 20 queries, ~36-39 KB proofs.
+
+Both use blowup 16 and 20 grinding bits. `gen-pq-anarchy-bundle`
+(`--features prover`) emits a chained create → update bundle for the
+testnet bench (`gh workflow run bench_testnet.yml -f contracts=pq-sep-anarchy`).
 
 ## Run
 
@@ -75,8 +96,6 @@ Takeaways:
   use a CSPRNG, or the proof is not zero-knowledge.
 - Security figures are heuristics. A real parameter choice needs a
   soundness calculator (FRI + DEEP-ALI + grinding).
-- Not wired into `pq/sep-anarchy` yet (contract API, VK storage,
-  `update_commitment` circuit).
 - Measured with testutils metering (same cost model as the network), not
   on a live network.
 - No audit.

@@ -2,7 +2,7 @@
 name = "pq-sep-anarchy-contract"
 version = "0.1.0"
 edition = "2021"
-description = "Soroban smart contract for SEP Anarchy (PQ flavor): per-type single-signer membership group, FRI-verified via the shared fri-verifier crate (BabyBear field, Poseidon2-W16 sponge transcript). Same entrypoint shape as plonk/sep-anarchy so clients are flavor-agnostic."
+description = "Soroban smart contract for SEP Anarchy (PQ flavor): per-type single-signer membership group, verified by zero-knowledge SHA-256 STARKs from pq/sha-fri (Poseidon2-BabyBear membership/update AIRs, FRI). Same entrypoint shape as plonk/sep-anarchy so clients are flavor-agnostic."
 license = "MIT"
 publish = false
 
@@ -10,17 +10,21 @@ publish = false
 crate-type = ["cdylib"]
 doctest = false
 
+[features]
+# Build the ~100-bit-conjectured profile (20 queries, ~39 KB proofs)
+# instead of the default ~100-bit Johnson-regime profile (40 queries,
+# ~76 KB proofs). See sha_fri::params::Profile.
+conjectured = []
+
 [dependencies]
-# Same SDK pin as plonk/sep-anarchy (=26.0.0; rustc floor 1.91.0).
-# The PQ verifier reaches into `env.crypto()` for the Poseidon2
-# host primitive — that surface is the same release.
 soroban-sdk = { version = "=26.0.0", features = ["alloc"] }
 
-# Shared no_std FRI verifier — single entry point this contract calls.
-fri-verifier = { path = "../verifier" }
+# Shared no_std STARK verifier — single entry point this contract calls.
+sha-fri = { path = "../sha-fri" }
 
 [dev-dependencies]
 soroban-sdk = { version = "=26.0.0", features = ["alloc", "testutils"] }
+sha-fri = { path = "../sha-fri", features = ["prover"] }
 
 [profile.release]
 opt-level = "z"

@@ -47,27 +47,27 @@ without branching on the underlying SNARK.
            ┌──────────────┐    ┌──────────────┐
            │   plonk/     │    │     pq/      │
            │              │    │              │
-           │  TurboPlonk  │    │  Plonky3     │
-           │  + BLS12-381 │    │  + FRI       │
-           │  + EF KZG    │    │              │
-           │    2023 SRS  │    │  hash-based  │
-           │    n=32 768  │    │  PQ;         │
-           │              │    │  transparent │
-           │  ┌─────────┐ │    │  setup       │
-           │  │ prover  │ │    │              │
-           │  └────┬────┘ │    │  blocked on  │
-           │       │ bake │    │  FRI host    │
-           │       ▼      │    │  functions   │
-           │  ┌─────────┐ │    │              │
-           │  │verifier │ │    │              │
-           │  └────┬────┘ │    │              │
-           │       │ ×5   │    │              │
-           │  ┌────┴────┐ │    │              │
-           │  │ sep-*   │ │    │              │
-           │  │ (5)     │ │    │              │
-           │  └─────────┘ │    │              │
+           │  TurboPlonk  │    │  ZK STARK    │
+           │  + BLS12-381 │    │  BabyBear +  │
+           │  + EF KZG    │    │  Poseidon2   │
+           │    2023 SRS  │    │  AIR, FRI    │
+           │    n=32 768  │    │              │
+           │              │    │  hash-based  │
+           │  ┌─────────┐ │    │  PQ (SHA-256 │
+           │  │ prover  │ │    │  host fn);   │
+           │  └────┬────┘ │    │  transparent │
+           │       │ bake │    │  setup       │
+           │       ▼      │    │              │
+           │  ┌─────────┐ │    │  ┌────────┐  │
+           │  │verifier │ │    │  │sha-fri │  │
+           │  └────┬────┘ │    │  └───┬────┘  │
+           │       │ ×5   │    │      │ ×1    │
+           │  ┌────┴────┐ │    │  ┌───┴────┐  │
+           │  │ sep-*   │ │    │  │ sep-   │  │
+           │  │ (5)     │ │    │  │anarchy │  │
+           │  └─────────┘ │    │  └────────┘  │
            └──────────────┘    └──────────────┘
-              TODAY               PLANNED
+              PRODUCTION          PROTOTYPE
 ```
 
 ```
@@ -147,8 +147,10 @@ without branching on the underlying SNARK.
   │   ├── sep-tyranny/    + README + tests + test_snapshots/
   │   └── tests/fixtures/          baked VK + canonical proof + PI
   │                                 byte fixtures (committed)
-  ├── pq/                          (planned — Plonky3 + FRI; blocked
-  │                                 on FRI host functions)
+  ├── pq/                          PQ flavor (prototype): sha-fri/
+  │                                 ZK STARK verifier + prover,
+  │                                 sep-anarchy/ contract; see
+  │                                 pq/sha-fri/README.md
   ├── scripts/bench-gas/           testnet gas-cost bench driver
   │   ├── run.sh                   orchestrator
   │   ├── setup.sh                 identity, friendbot, builds

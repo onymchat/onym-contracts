@@ -27,6 +27,7 @@ CONTRACT_ORDER = {
     # PQ flavor — sorted after PLONK so a mixed-flavor JSONL (if it
     # ever happens) puts PLONK rows on top.
     "pq-sep-anarchy": 10,
+    "pq-sep-anarchy-conjectured": 11,
 }
 
 OP_ORDER = {
@@ -226,7 +227,7 @@ PLONK_CONTRACTS = {
     "sep-oneonone",
     "sep-tyranny",
 }
-PQ_CONTRACTS = {"pq-sep-anarchy"}
+PQ_CONTRACTS = {"pq-sep-anarchy", "pq-sep-anarchy-conjectured"}
 
 
 def detect_flavor(contract_rows: list[dict], op_rows: list[dict]) -> str:
@@ -264,27 +265,23 @@ def notes_for_flavor(flavor: str) -> list[str]:
     if flavor == "pq":
         return common + [
             "- `create_group` / `verify_membership` / `update_commitment` rows "
-            "are real on-chain FRI verifications: the off-chain `gen-pq-proof` "
-            "binary in `pq/prover/` produces self-consistent FRI proofs the "
-            "on-chain verifier accepts at bench-scope parameters "
-            "(log_n=6, num_layers=3, num_queries=8, blowup=2). Proof size: "
-            "~8 KB.",
-            "- These numbers are **bench-scope only**: the on-chain verifier "
-            "today runs the FRI low-degree test alone, with no batched-PCS "
-            "layer tying FRI to an AIR. So the proofs prove "
-            "\"prover committed to a low-degree polynomial\" and nothing more — "
-            "they do not encode any circuit witness. Do **not** deploy the "
-            "contract behind this verifier for production; the `verifier_pcs` "
-            "follow-up is the gating dependency.",
+            "verify real zero-knowledge STARKs (`pq/sha-fri`): Poseidon2-BabyBear "
+            "membership / update AIRs, SHA-256 commitments via the `sha256` host "
+            "function, FRI at blowup 16 with 20 grinding bits. Proofs come from "
+            "`gen-pq-anarchy-bundle` (one random member at epoch 0, the same "
+            "member updating to epoch 1).",
+            "- `pq-sep-anarchy`: ~100-bit Johnson-regime profile (40 queries, "
+            "~70-76 KB proofs). `pq-sep-anarchy-conjectured`: ~100-bit "
+            "conjectured profile (20 queries, ~36-39 KB proofs). Proof bytes ride "
+            "in the transaction, so the size difference shows up in the fee.",
+            "- Prototype: Poseidon2 constants are not Plonky3's canonical set and "
+            "the verifier is unaudited (see `pq/sha-fri/README.md`).",
             "- `set_restricted_mode` second toggle is cheaper than the first "
             "because the storage slot already exists by then (the second write "
             "skips creation overhead).",
             "- `verify_membership` is read-only and does not consume the global "
             "nullifier — the same proof bytes can be re-submitted without "
             "burning `UsedProof` storage. Same convention as the PLONK flavor.",
-            "- See `pq/verifier/src/lib.rs` for the open-work list: batched "
-            "PCS layer, prover-side fixtures from a real circuit, canonical "
-            "Plonky3 Poseidon2 round constants.",
         ]
     if flavor == "plonk":
         return common + [

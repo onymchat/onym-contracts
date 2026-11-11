@@ -24,3 +24,8 @@ sha2 = { version = "0.10", default-features = false, optional = true }
 [profile.release]
 opt-level = 3
 lto = true
+
+[[bin]]
+name = "gen-pq-anarchy-bundle"
+path = "src/bin/gen_pq_anarchy_bundle.rs"
+required-features = ["prover"]

@@ -33,7 +33,7 @@
 //! - The bench prover's randomness is a seeded xorshift; a real prover
 //!   needs a CSPRNG for the proof to be zero-knowledge.
 //! - Security figures are heuristics, not a soundness calculator.
-//! - No external audit; not wired into a governance contract yet.
+//! - No external audit. Verified on-chain by `pq/sep-anarchy`.
 
 #![no_std]
 
