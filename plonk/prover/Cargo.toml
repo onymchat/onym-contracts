@@ -21,6 +21,10 @@ path = "src/bin/gen_membership_proof.rs"
 name = "gen-update-proof"
 path = "src/bin/gen_update_proof.rs"
 
+[[bin]]
+name = "gen-tyranny-proofs"
+path = "src/bin/gen_tyranny_proofs.rs"
+
 [dependencies]
 # --- Espresso jellyfish — TurboPlonk + jf-pcs (KZG) + jf-relation (gates). ---
 # Pinned to the SAME tags jf-plonk's own Cargo.toml uses for its transitive

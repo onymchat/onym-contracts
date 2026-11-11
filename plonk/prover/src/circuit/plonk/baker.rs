@@ -873,10 +873,16 @@ pub fn bake_membership_vk(depth: usize) -> Result<Vec<u8>, BakeError> {
 /// canonical secret keys + admin at index 0; group_id_fr pinned to
 /// `0x7777`.
 pub fn build_canonical_tyranny_create_witness(depth: usize) -> TyrannyCreateWitness {
+    build_tyranny_create_witness(depth, Fr::from(0x7777u64))
+}
+
+/// Tyranny-create witness over the canonical roster (keys 1..=8, admin
+/// at index 0, salt 0xEE) for an arbitrary `group_id_fr`. The bench
+/// uses distinct group ids per tier so one deployment hosts all three.
+pub fn build_tyranny_create_witness(depth: usize, group_id_fr: Fr) -> TyrannyCreateWitness {
     let secret_keys: Vec<Fr> = (1u64..=8).map(Fr::from).collect();
     let admin_index = 0usize;
     let salt: [u8; 32] = [0xEEu8; 32];
-    let group_id_fr = Fr::from(0x7777u64);
 
     let leaves: Vec<Fr> = secret_keys.iter().map(poseidon_hash_one_v05).collect();
     let num_leaves = 1usize << depth;
@@ -919,12 +925,22 @@ pub fn build_canonical_tyranny_create_witness(depth: usize) -> TyrannyCreateWitn
 /// Canonical tyranny-update witness at `depth`. epoch_old=1234, same
 /// admin (index 0), salt_old=0xEE, salt_new=0xFF, no roster change.
 pub fn build_canonical_tyranny_update_witness(depth: usize) -> TyrannyUpdateWitness {
+    build_tyranny_update_witness(depth, 1234, Fr::from(0x7777u64))
+}
+
+/// Tyranny-update witness over the canonical roster for an arbitrary
+/// `epoch_old` / `group_id_fr`. With `epoch_old = 0`, `c_old` equals the
+/// commitment of [`build_tyranny_create_witness`] for the same group, so
+/// create → update chains on a fresh deployment.
+pub fn build_tyranny_update_witness(
+    depth: usize,
+    epoch_old: u64,
+    group_id_fr: Fr,
+) -> TyrannyUpdateWitness {
     let secret_keys: Vec<Fr> = (1u64..=8).map(Fr::from).collect();
     let admin_index = 0usize;
-    let epoch_old: u64 = 1234;
     let salt_old: [u8; 32] = [0xEEu8; 32];
     let salt_new: [u8; 32] = [0xFFu8; 32];
-    let group_id_fr = Fr::from(0x7777u64);
 
     let leaves: Vec<Fr> = secret_keys.iter().map(poseidon_hash_one_v05).collect();
     let num_leaves = 1usize << depth;
