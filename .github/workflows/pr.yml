@@ -91,7 +91,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             plonk/verifier/target
-          key: pr-verifier-${{ hashFiles('plonk/verifier/Cargo.toml') }}
+          key: pr-verifier-${{ hashFiles('plonk/verifier/Cargo.toml', 'plonk/verifier/Cargo.lock') }}
 
       - name: cargo test
         working-directory: plonk/verifier
@@ -121,7 +121,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             plonk/prover/target
-          key: pr-prover-${{ hashFiles('plonk/prover/Cargo.toml', 'plonk/prover/src/circuit/plonk/baker.rs', 'plonk/verifier/tests/fixtures/**') }}
+          key: pr-prover-${{ hashFiles('plonk/prover/Cargo.toml', 'plonk/prover/Cargo.lock', 'plonk/prover/src/circuit/plonk/baker.rs', 'plonk/verifier/tests/fixtures/**') }}
 
       - name: Assert fixtures match (no STELLAR_REGEN_FIXTURES)
         working-directory: plonk/prover
