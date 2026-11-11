@@ -1,0 +1,25 @@
+[package]
+name = "pq-sha-fri-bench-contract"
+version = "0.1.0"
+edition = "2021"
+description = "Bench-only Soroban contract wrapping the sha-fri prototype verifier: one `verify(params, proof, public_inputs) -> bool` entrypoint with SHA-256 routed through the host. Used by pq/sha-fri-runner to measure metered CPU/memory under the real VM. Not a governance contract."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { version = "=26.0.0", features = ["alloc"] }
+sha-fri = { path = "../sha-fri" }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
