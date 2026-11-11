@@ -54,8 +54,9 @@ fn main() -> ExitCode {
                 profile = match value.as_str() {
                     "johnson" => Profile::Johnson100,
                     "conjectured" => Profile::Conjectured100,
+                    "pq100" => Profile::Pq100,
                     _ => {
-                        eprintln!("--profile must be johnson or conjectured");
+                        eprintln!("--profile must be johnson, conjectured or pq100");
                         return ExitCode::FAILURE;
                     }
                 }

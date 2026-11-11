@@ -9,14 +9,21 @@
 //!
 //! ## Extension field
 //!
-//! `E = F[X]/(X⁴ − 11)`. `X⁴ − 11` is irreducible because `11` is a
-//! quadratic non-residue mod `p` and `4 | p − 1` (pinned by
-//! `tests::eleven_is_non_residue`). ~124-bit field, used for every
-//! verifier challenge so soundness isn't capped by the 31-bit base.
+//! `E = F[X]/(X^D − 11)` with `D = EXT_DEG`: 4 by default (~124 bits),
+//! 8 with the `ext8` feature (~248 bits). `X^D − 11` is irreducible for
+//! `D ∈ {4, 8}` because `11` is a quadratic non-residue mod `p` and
+//! `D | p − 1` (pinned by `tests::eleven_is_non_residue`). Every verifier
+//! challenge lives here, so soundness isn't capped by the 31-bit base.
 //!
-//! Inversion uses the norm: `a⁻¹ = φ(a)·φ²(a)·φ³(a) / N(a)`, where
+//! **Why `ext8` exists:** the algebraic soundness error (DEEP/ALI, FRI
+//! folding) is about `degree / |E|`. A quantum adversary can search
+//! Fiat–Shamir transcripts quadratically faster, which caps post-quantum
+//! security near `log₂|E| / 2` minus the degree term: about 55 bits for
+//! `D = 4` whatever the query count, about 117 for `D = 8`.
+//!
+//! Inversion uses the norm: `a⁻¹ = (Π_{k=1}^{D−1} φᵏ(a)) / N(a)`, where
 //! `φ` is Frobenius. For a binomial extension `φ(X) = X^p = c·X` with
-//! `c = 11^((p−1)/4)`, so each Frobenius map is three base multiplies.
+//! `c = 11^((p−1)/D)`, so each Frobenius map is `D − 1` base multiplies.
 
 use core::ops::{Add, Mul, Neg, Sub};
 
@@ -49,9 +56,23 @@ const fn pow_mod(mut b: u32, mut e: u64) -> u32 {
     r
 }
 
-/// `FROB_POW[i] = c^i` with `c = W^((p−1)/4)`. `c⁴ = 1`, `c² = −1`.
-const FROB_C: u32 = pow_mod(W, ((P - 1) / 4) as u64);
-const FROB_POW: [u32; 4] = [1, FROB_C, mul_mod(FROB_C, FROB_C), mul_mod(mul_mod(FROB_C, FROB_C), FROB_C)];
+/// Extension degree.
+#[cfg(not(feature = "ext8"))]
+pub const EXT_DEG: usize = 4;
+#[cfg(feature = "ext8")]
+pub const EXT_DEG: usize = 8;
+
+/// `FROB_POW[i] = c^i` with `c = W^((p−1)/D)`, so `c^D = 1`.
+const FROB_C: u32 = pow_mod(W, ((P - 1) / EXT_DEG as u32) as u64);
+const FROB_POW: [u32; EXT_DEG] = {
+    let mut t = [1u32; EXT_DEG];
+    let mut i = 1;
+    while i < EXT_DEG {
+        t[i] = mul_mod(t[i - 1], FROB_C);
+        i += 1;
+    }
+    t
+};
 
 /// Base-field element, always canonical (`< P`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -130,37 +151,42 @@ impl Mul for F {
     }
 }
 
-/// Extension-field element `Σ aᵢ·Xⁱ`, `i < 4`.
+/// Extension-field element `Σ aᵢ·Xⁱ`, `i < EXT_DEG`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct E(pub [F; 4]);
+pub struct E(pub [F; EXT_DEG]);
 
-/// Serialized size of one [`E`]: four little-endian `u32`s.
-pub const E_BYTES: usize = 16;
+/// Serialized size of one [`E`]: `EXT_DEG` little-endian `u32`s.
+pub const E_BYTES: usize = 4 * EXT_DEG;
 
 impl E {
-    pub const ZERO: E = E([F::ZERO; 4]);
-    pub const ONE: E = E([F::ONE, F::ZERO, F::ZERO, F::ZERO]);
+    pub const ZERO: E = E([F::ZERO; EXT_DEG]);
+    pub const ONE: E = E::from_base(F::ONE);
 
     pub const fn from_base(f: F) -> E {
-        E([f, F::ZERO, F::ZERO, F::ZERO])
+        let mut c = [F::ZERO; EXT_DEG];
+        c[0] = f;
+        E(c)
     }
 
     #[inline]
     pub fn mul_base(self, f: F) -> E {
-        E([self.0[0] * f, self.0[1] * f, self.0[2] * f, self.0[3] * f])
+        E(self.0.map(|c| c * f))
     }
 
-    /// `φᵏ(a)`: coefficient `i` scales by `c^(k·i mod 4)`.
+    /// `φᵏ(a)`: coefficient `i` scales by `c^(k·i mod D)`.
     fn frobenius(self, k: usize) -> E {
         let mut out = self;
-        for i in 1..4 {
-            out.0[i] = self.0[i] * F(FROB_POW[(k * i) % 4]);
+        for i in 1..EXT_DEG {
+            out.0[i] = self.0[i] * F(FROB_POW[(k * i) % EXT_DEG]);
         }
         out
     }
 
     pub fn inv(self) -> E {
-        let b = self.frobenius(1) * self.frobenius(2) * self.frobenius(3);
+        let mut b = self.frobenius(1);
+        for k in 2..EXT_DEG {
+            b = b * self.frobenius(k);
+        }
         // a·b is the norm, which lies in the base field.
         let norm = (self * b).0[0];
         b.mul_base(norm.inv())
@@ -168,7 +194,7 @@ impl E {
 
     pub fn to_bytes(self) -> [u8; E_BYTES] {
         let mut out = [0u8; E_BYTES];
-        for i in 0..4 {
+        for i in 0..EXT_DEG {
             out[4 * i..4 * i + 4].copy_from_slice(&self.0[i].0.to_le_bytes());
         }
         out
@@ -180,7 +206,7 @@ impl E {
             return None;
         }
         let mut out = E::ZERO;
-        for i in 0..4 {
+        for i in 0..EXT_DEG {
             let v = u32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]);
             out.0[i] = F::from_canonical(v)?;
         }
@@ -192,7 +218,11 @@ impl Add for E {
     type Output = E;
     #[inline]
     fn add(self, rhs: E) -> E {
-        E([self.0[0] + rhs.0[0], self.0[1] + rhs.0[1], self.0[2] + rhs.0[2], self.0[3] + rhs.0[3]])
+        let mut out = self;
+        for i in 0..EXT_DEG {
+            out.0[i] = self.0[i] + rhs.0[i];
+        }
+        out
     }
 }
 
@@ -200,10 +230,39 @@ impl Sub for E {
     type Output = E;
     #[inline]
     fn sub(self, rhs: E) -> E {
-        E([self.0[0] - rhs.0[0], self.0[1] - rhs.0[1], self.0[2] - rhs.0[2], self.0[3] - rhs.0[3]])
+        let mut out = self;
+        for i in 0..EXT_DEG {
+            out.0[i] = self.0[i] - rhs.0[i];
+        }
+        out
     }
 }
 
+/// Generic schoolbook product for `ext8`: each partial product is reduced
+/// before summing (eight unreduced `p²` terms would overflow `u64`).
+#[cfg(feature = "ext8")]
+impl Mul for E {
+    type Output = E;
+    fn mul(self, rhs: E) -> E {
+        let mut lo = [0u64; EXT_DEG];
+        let mut hi = [0u64; EXT_DEG];
+        for i in 0..EXT_DEG {
+            let a = self.0[i].0 as u64;
+            for j in 0..EXT_DEG {
+                let t = (a * rhs.0[j].0 as u64) % P64;
+                if i + j < EXT_DEG {
+                    lo[i + j] += t;
+                } else {
+                    hi[i + j - EXT_DEG] += t;
+                }
+            }
+        }
+        let w = W as u64;
+        E(core::array::from_fn(|k| F::from_u64(lo[k] % P64 + w * (hi[k] % P64))))
+    }
+}
+
+#[cfg(not(feature = "ext8"))]
 impl Mul for E {
     type Output = E;
     fn mul(self, rhs: E) -> E {
@@ -279,6 +338,7 @@ mod tests {
     #[test]
     fn eleven_is_non_residue() {
         assert_eq!(F(W).pow(((P - 1) / 2) as u64), -F::ONE);
+        assert_eq!((P - 1) % EXT_DEG as u32, 0);
     }
 
     #[test]
@@ -313,20 +373,31 @@ mod tests {
     fn ext_inverse_round_trips_and_norm_is_base() {
         let mut s = 0xdead_beef_cafe_f00d;
         for _ in 0..100 {
-            let a = E([sample(&mut s), sample(&mut s), sample(&mut s), sample(&mut s)]);
-            let b = a.frobenius(1) * a.frobenius(2) * a.frobenius(3);
+            let a = E(core::array::from_fn(|_| sample(&mut s)));
+            let mut b = a.frobenius(1);
+            for k in 2..EXT_DEG {
+                b = b * a.frobenius(k);
+            }
             let n = a * b;
-            assert_eq!(&n.0[1..], &[F::ZERO; 3]);
+            assert_eq!(&n.0[1..], &[F::ZERO; EXT_DEG - 1]);
             assert_eq!(a * a.inv(), E::ONE);
         }
     }
 
     #[test]
     fn ext_mul_matches_schoolbook() {
-        // X · X³ = X⁴ = W.
-        let x = E([F::ZERO, F::ONE, F::ZERO, F::ZERO]);
-        let x3 = E([F::ZERO, F::ZERO, F::ZERO, F::ONE]);
-        assert_eq!(x * x3, E::from_base(F(W)));
+        // X · X^(D−1) = X^D = W.
+        let mut x = E::ZERO;
+        x.0[1] = F::ONE;
+        let mut xd1 = E::ZERO;
+        xd1.0[EXT_DEG - 1] = F::ONE;
+        assert_eq!(x * xd1, E::from_base(F(W)));
+        // Associativity + distributivity on random elements.
+        let mut s = 0x0123_4567_89ab_cdef;
+        let r = |s: &mut u64| E(core::array::from_fn(|_| sample(s)));
+        let (a, b, c) = (r(&mut s), r(&mut s), r(&mut s));
+        assert_eq!((a * b) * c, a * (b * c));
+        assert_eq!(a * (b + c), a * b + a * c);
     }
 
     #[test]

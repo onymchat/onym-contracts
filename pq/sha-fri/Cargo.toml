@@ -16,6 +16,9 @@ doctest = false
 # in the `sha2` crate. Both hash byte-identical inputs.
 [features]
 std = []
+# Degree-8 challenge extension (~248 bits) for post-quantum parameter
+# sets; see field.rs.
+ext8 = []
 prover = ["std", "dep:sha2"]
 
 [dependencies]
@@ -29,3 +32,8 @@ lto = true
 name = "gen-pq-anarchy-bundle"
 path = "src/bin/gen_pq_anarchy_bundle.rs"
 required-features = ["prover"]
+
+[[bin]]
+name = "gen-pq-tyranny-bundle"
+path = "src/bin/gen_pq_tyranny_bundle.rs"
+required-features = ["prover", "ext8"]

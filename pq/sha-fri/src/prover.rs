@@ -17,8 +17,8 @@
 //! (the AIR holds on the trace), the AIR identity holds at `z`, and the
 //! final FRI codeword is low-degree.
 
-use crate::air::{self, Shape, Witness, NUM_COLS};
-use crate::field::{E, F};
+use crate::air::{self, Shape, Witness, MAX_COLS};
+use crate::field::{E, EXT_DEG, F};
 use crate::fold::fold_leaf;
 use crate::hash::{Digest, Hasher};
 use crate::merkle::{leaf_hash, node_hash};
@@ -79,7 +79,7 @@ impl Rng {
         F::from_u64(self.next())
     }
     fn e(&mut self) -> E {
-        E([self.f(), self.f(), self.f(), self.f()])
+        E(core::array::from_fn(|_| self.f()))
     }
     fn salt(&mut self) -> [u8; LEAF_SALT] {
         let mut s = [0u8; LEAF_SALT];
@@ -142,7 +142,7 @@ fn prove_trace<H: Hasher>(
     h: &H,
     p: &Params,
     pi: &air::PublicInputs,
-    rows: Vec<[F; NUM_COLS]>,
+    rows: Vec<[F; MAX_COLS]>,
     seed: u64,
 ) -> Vec<u8> {
     p.validate().expect("invalid params");
@@ -161,7 +161,8 @@ fn prove_trace<H: Hasher>(
     let g = F::two_adic_generator(p.log_n());
 
     // ---- Trace: interpolate, mask with Z_H·R, LDE on the coset -------
-    let t_coeffs: Vec<Vec<F>> = (0..NUM_COLS)
+    let num_cols = shape.num_cols();
+    let t_coeffs: Vec<Vec<F>> = (0..num_cols)
         .map(|c| {
             let mut v: Vec<F> = rows.iter().map(|r| r[c]).collect();
             intt(&mut v, g);
@@ -200,11 +201,11 @@ fn prove_trace<H: Hasher>(
     let step = n0 / n; // g = ω₀^step
     let mut q_evals = Vec::with_capacity(n0);
     let mut nums: Vec<F> = Vec::with_capacity(count);
-    let mut local = [F::ZERO; NUM_COLS];
-    let mut next = [F::ZERO; NUM_COLS];
+    let mut local = vec![F::ZERO; num_cols];
+    let mut next = vec![F::ZERO; num_cols];
     let mut x = SHIFT;
     for i in 0..n0 {
-        for c in 0..NUM_COLS {
+        for c in 0..num_cols {
             local[c] = t_lde[c][i];
             next[c] = t_lde[c][(i + step) % n0];
         }
@@ -236,14 +237,15 @@ fn prove_trace<H: Hasher>(
             q_chunks[j + 1][i] = q_chunks[j + 1][i] - b;
         }
     }
-    // Base-field coefficient columns: 4 per chunk, then 4 for the mask.
+    // Base-field coefficient columns: EXT_DEG per chunk, then EXT_DEG for
+    // the mask.
     let mut q_col_coeffs: Vec<Vec<F>> = Vec::with_capacity(p.quotient_cols());
     for chunk in &q_chunks {
-        for comp in 0..4 {
+        for comp in 0..EXT_DEG {
             q_col_coeffs.push(chunk.iter().map(|e| e.0[comp]).collect());
         }
     }
-    for _ in 0..4 {
+    for _ in 0..EXT_DEG {
         q_col_coeffs.push((0..2 * n).map(|_| rng.f()).collect());
     }
     let q_lde: Vec<Vec<F>> = q_col_coeffs.iter().map(|c| coset_lde(c, log_n0, SHIFT)).collect();
@@ -256,7 +258,7 @@ fn prove_trace<H: Hasher>(
 
     // ---- OOD values -------------------------------------------------
     let gz = z.mul_base(g);
-    let chunk_cols = 4 * chunks;
+    let chunk_cols = EXT_DEG * chunks;
     let ood_z: Vec<E> = t_coeffs.iter().map(|c| eval_base(c, z)).collect();
     let ood_gz: Vec<E> = t_coeffs.iter().map(|c| eval_base(c, gz)).collect();
     let ood_q: Vec<E> = q_col_coeffs[..chunk_cols].iter().map(|c| eval_base(c, z)).collect();
@@ -270,17 +272,17 @@ fn prove_trace<H: Hasher>(
     // ---- DEEP codeword ----------------------------------------------
     let deep = deep_coeffs(gamma, &ood_z, &ood_gz, &ood_q);
     let mut cur: Vec<E> = Vec::with_capacity(n0);
-    let mut trace_row = [F::ZERO; NUM_COLS];
+    let mut trace_row = vec![F::ZERO; num_cols];
     let mut quot_row = vec![F::ZERO; chunk_cols];
     let mut x = SHIFT;
     for i in 0..n0 {
-        for c in 0..NUM_COLS {
+        for c in 0..num_cols {
             trace_row[c] = t_lde[c][i];
         }
         for c in 0..chunk_cols {
             quot_row[c] = q_lde[c][i];
         }
-        let mask = [q_lde[chunk_cols][i], q_lde[chunk_cols + 1][i], q_lde[chunk_cols + 2][i], q_lde[chunk_cols + 3][i]];
+        let mask: [F; EXT_DEG] = core::array::from_fn(|k| q_lde[chunk_cols + k][i]);
         cur.push(deep.eval(x, z, gz, &trace_row, &quot_row, mask));
         x = x * omega0;
     }
@@ -349,7 +351,13 @@ pub fn random_witness(depth: usize, seed: u64, epoch: u64) -> Witness {
     let salt = digest();
     let path = (0..depth).map(|_| digest()).collect();
     let index = (seed as usize) & ((1 << depth) - 1);
-    Witness { sk, path, index, salt, epoch, update: None }
+    Witness { sk, path, index, salt, epoch, update: None, admin_group: None }
+}
+
+/// Bind `w` to group `group_id` as its admin (tyranny statements).
+pub fn with_admin(mut w: Witness, group_id: [F; 8]) -> Witness {
+    w.admin_group = Some(group_id);
+    w
 }
 
 /// The same member's update from `w`'s state to a random new root/salt.
@@ -381,14 +389,17 @@ mod tests {
     }
 
     fn witness(kind: Kind) -> Witness {
-        let w = random_witness(3, 5, 0x0000_1234_5678_9abc);
-        match kind {
-            Kind::Membership => w,
-            Kind::Update => with_random_update(w, 6),
+        let mut w = random_witness(3, 5, 0x0000_1234_5678_9abc);
+        if kind.has_update() {
+            w = with_random_update(w, 6);
         }
+        if kind.has_admin() {
+            w = with_admin(w, core::array::from_fn(|i| F::from_u64(0x7777 + i as u64)));
+        }
+        w
     }
 
-    const KINDS: [Kind; 2] = [Kind::Membership, Kind::Update];
+    const KINDS: [Kind; 4] = [Kind::Membership, Kind::Update, Kind::AdminCreate, Kind::AdminUpdate];
 
     #[test]
     fn constants_match_derivation() {
@@ -425,7 +436,7 @@ mod tests {
                 air::eval(&shape, &rows[r], &rows[(r + 1) % shape.n()], &per, &pi, &mut nums);
                 let x = g.pow(r as u64);
                 let divs = air::divisors(&shape, x, x.pow(shape.n() as u64), g);
-                for (gi, &(s, e)) in air::groups(kind).iter().enumerate() {
+                for &(s, e, gi) in air::groups(kind) {
                     if divs[gi] == F::ZERO {
                         for i in s..e {
                             assert_eq!(nums[i], F::ZERO, "{kind:?} row {r} group {gi} constraint {i}");
@@ -468,13 +479,16 @@ mod tests {
         use crate::params::{deployment_params, Profile};
         for kind in KINDS {
             for depth in [5u8, 8, 11] {
-                for profile in [Profile::Johnson100, Profile::Conjectured100] {
+                for profile in [Profile::Johnson100, Profile::Conjectured100, Profile::Pq100] {
                     let p = deployment_params(kind, depth, profile);
                     assert_eq!(p.validate(), Ok(()), "{kind:?} d{depth} {profile:?}");
                     assert_eq!(p.final_poly_len(), 1);
                     let bits = match profile {
                         Profile::Johnson100 => p.johnson_security_bits(),
                         Profile::Conjectured100 => p.conjectured_security_bits(),
+                        // Only reachable with the degree-8 challenge field.
+                        Profile::Pq100 if crate::field::EXT_DEG < 8 => continue,
+                        Profile::Pq100 => p.pq_security_bits(),
                     };
                     assert!(bits >= 100, "{kind:?} d{depth} {profile:?}: {bits} bits");
                 }
@@ -496,7 +510,17 @@ mod tests {
             c[3] = c[3] + F::ONE;
             let wrong_commit = PublicInputs { commitment: c, ..w.public_inputs() };
             assert!(verify(&Sha2Hasher, &pb, &proof, &wrong_commit.to_bytes()).is_err());
-            if kind == Kind::Update {
+            if kind.has_admin() {
+                let (mut a, g) = pi.admin.unwrap();
+                a[1] = a[1] + F::ONE;
+                let wrong_admin = PublicInputs { admin: Some((a, g)), ..w.public_inputs() };
+                assert!(verify(&Sha2Hasher, &pb, &proof, &wrong_admin.to_bytes()).is_err());
+                let (a, mut g) = pi.admin.unwrap();
+                g[0] = g[0] + F::ONE;
+                let other_group = PublicInputs { admin: Some((a, g)), ..w.public_inputs() };
+                assert!(verify(&Sha2Hasher, &pb, &proof, &other_group.to_bytes()).is_err());
+            }
+            if kind.has_update() {
                 let mut c_new = pi.c_new.unwrap();
                 c_new[0] = c_new[0] + F::ONE;
                 let wrong_new = PublicInputs { c_new: Some(c_new), ..w.public_inputs() };
@@ -563,6 +587,28 @@ mod tests {
         let real = w.public_inputs();
         w.sk[0] = w.sk[0] + F::ONE;
         prove_trace(&Sha2Hasher, &p, &real, w.trace(&p.shape()), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "AIR not satisfied")]
+    fn prover_refuses_admin_claim_by_other_member() {
+        // A different member of the same tree can't produce the admin's
+        // admin_comm: the leaf feeding H(leaf ‖ group_id) is their own.
+        let p = small(Kind::AdminCreate);
+        let admin = witness(Kind::AdminCreate);
+        let real = admin.public_inputs();
+        let mut other = witness(Kind::AdminCreate);
+        other.sk[2] = other.sk[2] + F::ONE;
+        prove_trace(&Sha2Hasher, &p, &real, other.trace(&p.shape()), 1);
+    }
+
+    #[test]
+    fn admin_commitment_is_group_specific() {
+        let w = witness(Kind::AdminCreate);
+        let a1 = w.public_inputs().admin.unwrap().0;
+        let w2 = with_admin(witness(Kind::Membership), core::array::from_fn(|i| F::from_u64(9 + i as u64)));
+        let a2 = w2.public_inputs().admin.unwrap().0;
+        assert_ne!(a1, a2, "same admin, different groups must not link");
     }
 
     #[test]

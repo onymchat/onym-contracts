@@ -13,6 +13,7 @@ name: Bench gas (testnet)
 #
 #   gh workflow run bench_testnet.yml -f contracts=sep-tyranny
 #   gh workflow run bench_testnet.yml -f contracts=pq-sep-anarchy
+#   gh workflow run bench_testnet.yml -f contracts=pq-sep-tyranny
 #
 # Third-party `uses:` are pinned to commit SHA (version tag in a
 # trailing comment), same posture as release.yml.
@@ -21,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       contracts:
-        description: 'Space-separated contracts to bench (sep-anarchy sep-democracy sep-oligarchy sep-oneonone sep-tyranny pq-sep-anarchy)'
+        description: 'Space-separated contracts to bench (sep-anarchy sep-democracy sep-oligarchy sep-oneonone sep-tyranny pq-sep-anarchy pq-sep-tyranny)'
         required: false
         default: 'sep-tyranny'
         type: string
@@ -58,7 +59,7 @@ jobs:
           for c in $CONTRACTS; do
             case "$c" in
               sep-anarchy|sep-democracy|sep-oligarchy|sep-oneonone|sep-tyranny) plonk="$plonk $c" ;;
-              pq-sep-anarchy) pq="$pq $c" ;;
+              pq-sep-anarchy|pq-sep-tyranny) pq="$pq $c" ;;
               *) echo "::error::unknown contract '$c'"; exit 1 ;;
             esac
           done
