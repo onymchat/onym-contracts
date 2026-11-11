@@ -28,6 +28,7 @@ CONTRACT_ORDER = {
     # ever happens) puts PLONK rows on top.
     "pq-sep-anarchy": 10,
     "pq-sep-anarchy-conjectured": 11,
+    "pq-sep-tyranny": 12,
 }
 
 OP_ORDER = {
@@ -227,7 +228,7 @@ PLONK_CONTRACTS = {
     "sep-oneonone",
     "sep-tyranny",
 }
-PQ_CONTRACTS = {"pq-sep-anarchy", "pq-sep-anarchy-conjectured"}
+PQ_CONTRACTS = {"pq-sep-anarchy", "pq-sep-anarchy-conjectured", "pq-sep-tyranny"}
 
 
 def detect_flavor(contract_rows: list[dict], op_rows: list[dict]) -> str:
@@ -274,6 +275,10 @@ def notes_for_flavor(flavor: str) -> list[str]:
             "~70-76 KB proofs). `pq-sep-anarchy-conjectured`: ~100-bit "
             "conjectured profile (20 queries, ~36-39 KB proofs). Proof bytes ride "
             "in the transaction, so the size difference shows up in the fee.",
+            "- `pq-sep-tyranny`: ~100-bit **post-quantum** profile (`Pq100`: degree-8 "
+            "challenge field, blowup 64, 30 queries, 20 grinding bits; quantum "
+            "attacks halve Fiat–Shamir and grinding bits). ~84-101 KB proofs. The "
+            "anarchy profiles above are ~100-bit classical, ~50-bit post-quantum.",
             "- Prototype: Poseidon2 constants are not Plonky3's canonical set and "
             "the verifier is unaudited (see `pq/sha-fri/README.md`).",
             "- `set_restricted_mode` second toggle is cheaper than the first "

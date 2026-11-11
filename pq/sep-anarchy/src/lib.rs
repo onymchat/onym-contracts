@@ -56,9 +56,11 @@ const UPDATE_PI_COUNT: u32 = 3;
 const MAX_PROOF_BYTES: u32 = 128 * 1024;
 
 /// Security profile baked into this build (see `sha_fri::params::Profile`).
-/// Default: ~100 bits in the conservative Johnson regime. The
+/// Default: ~100 bits classical in the conservative Johnson regime. The
 /// `conjectured` feature builds the ~100-bit-conjectured variant with
-/// half the queries and roughly half the proof size.
+/// half the queries and roughly half the proof size. **Both are only ~50
+/// bits against a quantum adversary**; `pq/sep-tyranny` uses the
+/// post-quantum `Pq100` profile.
 #[cfg(not(feature = "conjectured"))]
 const PROFILE: Profile = Profile::Johnson100;
 #[cfg(feature = "conjectured")]

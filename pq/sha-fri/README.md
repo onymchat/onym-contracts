@@ -32,6 +32,11 @@ The PQ analogues of `plonk/prover`'s `MembershipCircuit` and
   commitment = H(H(root ‖ epoch limbs ‖ 0⁵) ‖ salt)
 ```
 
+**Tyranny admin** (`pq/sep-tyranny` create / update): the membership
+(resp. update) statement plus `admin_comm = H(leaf ‖ group_id)`, binding
+the prover's own leaf to a per-group public value. The leaf rides in 8
+carry columns from the first block to the admin block.
+
 **Update** (`update_commitment`): the membership statement for
 `(c_old, epoch_old)`, plus `c_new = H(H(root_new ‖ (epoch_old+1) limbs) ‖
 salt_new)` with `root_new` and `salt_new` private. As in the PLONK
@@ -40,16 +45,27 @@ so the trace is 512 rows at every tier.
 
 ## Deployment
 
-`pq/sep-anarchy` verifies these proofs on-chain. `params::deployment_params`
-is the single source of the per-tier parameters for both the contract
-and the prover, with two profiles:
+`params::deployment_params` is the single source of the per-tier
+parameters for the contracts and the prover:
 
-- **`Johnson100`** (default build): 40 queries, ~70-76 KB proofs.
-- **`Conjectured100`** (`--features conjectured`): 20 queries, ~36-39 KB proofs.
+| Profile | Used by | Field | Blowup / queries / grind | Classical | **Post-quantum** | Proof |
+|---|---|---|---|---|---|---|
+| `Johnson100` | `pq/sep-anarchy` (default) | BabyBear⁴ | 16 / 40 / 20 | ~100 (Johnson) | **~50** | 70-76 KB |
+| `Conjectured100` | `pq/sep-anarchy --features conjectured` | BabyBear⁴ | 16 / 20 / 20 | ~100 (conj.) | **~50** | 36-39 KB |
+| `Pq100` | `pq/sep-tyranny` | BabyBear⁸ (`ext8`) | 64 / 30 / 20 | ~200 (conj.) | **~100** | 84-101 KB |
 
-Both use blowup 16 and 20 grinding bits. `gen-pq-anarchy-bundle`
-(`--features prover`) emits a chained create → update bundle for the
-testnet bench (`gh workflow run bench_testnet.yml -f contracts=pq-sep-anarchy`).
+Post-quantum figures follow `Params::pq_security_bits`: against a quantum
+adversary Fiat–Shamir soundness halves (QROM) and Grover halves
+grinding. The challenge field caps it too (`≈ log₂|E|/2` minus the
+degree term), so BabyBear⁴ can never exceed ~55 bits post-quantum;
+`Pq100` needs the degree-8 field (`ext8`). Blowup 64 with 30 queries gave
+the smallest `Pq100` proofs in a sweep (89 KB at 512 rows, vs 119 KB at
+blowup 16 / 45 queries).
+
+Bundle generators for the testnet bench: `gen-pq-anarchy-bundle`
+(`--features prover`) and `gen-pq-tyranny-bundle` (`--features
+prover,ext8`). Run the bench with
+`gh workflow run bench_testnet.yml -f contracts="pq-sep-anarchy pq-sep-tyranny"`.
 
 ## Run
 

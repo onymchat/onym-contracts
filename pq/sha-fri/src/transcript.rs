@@ -39,11 +39,15 @@ impl<'a, H: Hasher> Transcript<'a, H> {
     /// Four 64-bit chunks, each reduced mod p. The reduction bias is
     /// ~2⁻³³ per coefficient: negligible.
     pub fn challenge_ext(&mut self) -> E {
-        let d = self.squeeze();
+        // 4 coefficients per squeeze (32 bytes = 4 × u64).
         let mut out = E::ZERO;
-        for i in 0..4 {
+        let mut d = [0u8; 32];
+        for i in 0..crate::field::EXT_DEG {
+            if i % 4 == 0 {
+                d = self.squeeze();
+            }
             let mut chunk = [0u8; 8];
-            chunk.copy_from_slice(&d[8 * i..8 * i + 8]);
+            chunk.copy_from_slice(&d[8 * (i % 4)..8 * (i % 4) + 8]);
             out.0[i] = F::from_u64(u64::from_le_bytes(chunk));
         }
         out

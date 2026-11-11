@@ -144,10 +144,11 @@ impl Params {
         (q_deg + 1).div_ceil(n)
     }
 
-    /// Columns in the quotient tree: `4 × chunks` (each extension-valued
-    /// chunk as four base polynomials) + 4 for the FRI mask polynomial.
+    /// Columns in the quotient tree: `EXT_DEG × chunks` (each
+    /// extension-valued chunk as `EXT_DEG` base polynomials) + `EXT_DEG`
+    /// for the FRI mask polynomial.
     pub fn quotient_cols(&self) -> usize {
-        4 * self.num_quotient_chunks() + 4
+        crate::field::EXT_DEG * (self.num_quotient_chunks() + 1)
     }
 
     pub fn num_layers(&self) -> usize {
@@ -184,6 +185,19 @@ impl Params {
     pub fn johnson_security_bits(&self) -> u32 {
         self.num_queries as u32 * self.log_blowup as u32 / 2 + self.grind_bits as u32
     }
+
+    /// Post-quantum estimate (conjectured FRI soundness). Against a
+    /// quantum adversary, Fiat–Shamir soundness halves (round-by-round
+    /// soundness ε gives ~√ε in the QROM) and Grover halves grinding.
+    /// It is further capped by the algebraic error of the challenge
+    /// field, `≈ max_degree · n₀ / |E|`, which also halves.
+    pub fn pq_security_bits(&self) -> u32 {
+        let query_bits = self.conjectured_security_bits() / 2;
+        let field_bits = 31 * crate::field::EXT_DEG as u32;
+        let degree_bits = usize::BITS - self.max_constraint_degree().leading_zeros() + self.log_n0();
+        let algebraic_bits = field_bits.saturating_sub(degree_bits) / 2;
+        query_bits.min(algebraic_bits)
+    }
 }
 
 /// Security profile for a deployment.
@@ -195,16 +209,23 @@ pub enum Profile {
     /// ~100 bits under the up-to-capacity proximity-gap conjecture:
     /// 20 queries at blowup 16 plus 20 grinding bits.
     Conjectured100,
+    /// ~100 bits against a quantum adversary (see
+    /// `Params::pq_security_bits`): 30 queries at blowup 64 plus 20
+    /// grinding bits, conjectured FRI soundness. Needs the `ext8`
+    /// challenge field; with degree 4 the algebraic error caps it ~55.
+    /// Blowup 64 / 30 queries gave the smallest proofs in a sweep
+    /// (89 KB at 512 rows vs 119 KB for blowup 16 / 45 queries).
+    Pq100,
 }
 
 /// The parameters a deployed contract pins for `(kind, depth)`. Single
 /// source of truth for the contract and the prover.
 pub fn deployment_params(kind: Kind, depth: u8, profile: Profile) -> Params {
-    let num_queries: u16 = match profile {
-        Profile::Johnson100 => 40,
-        Profile::Conjectured100 => 20,
+    let (num_queries, log_blowup): (u16, u8) = match profile {
+        Profile::Johnson100 => (40, 4),
+        Profile::Conjectured100 => (20, 4),
+        Profile::Pq100 => (30, 6),
     };
-    let log_blowup = 4u8;
     let mut p = Params {
         kind,
         depth,

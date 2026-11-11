@@ -26,6 +26,19 @@
 //! new-tree binding is commitment-only, exactly like the PLONK update
 //! circuit. Public: `c_old`, `epoch_old`, `c_new`. Two more blocks.
 //!
+//! **Admin** ([`Kind::AdminCreate`], [`Kind::AdminUpdate`]): the tyranny
+//! statements. Membership (resp. update) plus
+//!
+//! ```text
+//!   admin_comm = H(leaf ‖ group_id)
+//! ```
+//!
+//! binding the prover's own leaf to a per-group public value, the PQ
+//! analogue of PLONK tyranny's `Poseidon(Poseidon(sk), group_id_fr)`. The
+//! leaf is carried from block 0 to the final admin block in 8 extra
+//! `carry` columns, constant over the trace. Public adds `admin_comm` and
+//! `group_id` (both digests). One more block.
+//!
 //! ## Layout: one 32-row block per permutation, one row per round
 //!
 //! Columns (`W = 25`): `s[0..16]` state, `sib[0..8]`, `bit`.
@@ -80,7 +93,11 @@ pub const BLOCK: usize = 32;
 pub const LOG_BLOCK: u32 = 5;
 pub const COL_SIB: usize = WIDTH;
 pub const COL_BIT: usize = WIDTH + DIGEST;
+/// Columns without the admin carry.
 pub const NUM_COLS: usize = WIDTH + DIGEST + 1;
+/// Admin statements carry the leaf in 8 more columns.
+pub const COL_CARRY: usize = NUM_COLS;
+pub const MAX_COLS: usize = NUM_COLS + DIGEST;
 
 /// Periodic columns: 4 selectors, then 16 round-constant lanes.
 pub const PER_FIRST: usize = 0;
@@ -94,6 +111,8 @@ pub const NUM_PERIODIC: usize = 4 + WIDTH;
 pub enum Kind {
     Membership = 0,
     Update = 1,
+    AdminCreate = 2,
+    AdminUpdate = 3,
 }
 
 impl Kind {
@@ -101,15 +120,20 @@ impl Kind {
         match b {
             0 => Some(Kind::Membership),
             1 => Some(Kind::Update),
+            2 => Some(Kind::AdminCreate),
+            3 => Some(Kind::AdminUpdate),
             _ => None,
         }
     }
+    pub fn has_update(self) -> bool {
+        matches!(self, Kind::Update | Kind::AdminUpdate)
+    }
+    pub fn has_admin(self) -> bool {
+        matches!(self, Kind::AdminCreate | Kind::AdminUpdate)
+    }
     /// Permutations before padding.
     fn perms(self, depth: usize) -> usize {
-        match self {
-            Kind::Membership => depth + 3,
-            Kind::Update => depth + 5,
-        }
+        depth + 3 + if self.has_update() { 2 } else { 0 } + if self.has_admin() { 1 } else { 0 }
     }
 }
 
@@ -147,6 +171,17 @@ impl Shape {
     pub fn link_row(&self, block: usize) -> usize {
         BLOCK * block + BLOCK - 1
     }
+    pub fn num_cols(&self) -> usize {
+        if self.kind.has_admin() {
+            MAX_COLS
+        } else {
+            NUM_COLS
+        }
+    }
+    /// The admin-binding block (last real permutation).
+    pub fn admin_block(&self) -> usize {
+        self.kind.perms(self.depth) - 1
+    }
 }
 
 /// Membership: `(commitment, epoch)`. Update: `(c_old, epoch_old, c_new)`
@@ -158,6 +193,8 @@ pub struct PublicInputs {
     pub commitment: [F; DIGEST],
     pub epoch: u64,
     pub c_new: Option<[F; DIGEST]>,
+    /// Admin statements: `(admin_comm, group_id)`.
+    pub admin: Option<([F; DIGEST], [F; DIGEST])>,
 }
 
 pub const DIGEST_BYTES: usize = 4 * DIGEST;
@@ -183,19 +220,23 @@ pub fn digest_from_bytes(b: &[u8]) -> Option<[F; DIGEST]> {
 }
 
 impl PublicInputs {
+    /// `commitment ‖ epoch [‖ c_new] [‖ admin_comm ‖ group_id]`.
     pub fn byte_len(kind: Kind) -> usize {
-        match kind {
-            Kind::Membership => DIGEST_BYTES + 8,
-            Kind::Update => 2 * DIGEST_BYTES + 8,
-        }
+        DIGEST_BYTES + 8
+            + if kind.has_update() { DIGEST_BYTES } else { 0 }
+            + if kind.has_admin() { 2 * DIGEST_BYTES } else { 0 }
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(2 * DIGEST_BYTES + 8);
+        let mut out = Vec::with_capacity(4 * DIGEST_BYTES + 8);
         out.extend_from_slice(&digest_to_bytes(&self.commitment));
         out.extend_from_slice(&self.epoch.to_le_bytes());
         if let Some(c) = &self.c_new {
             out.extend_from_slice(&digest_to_bytes(c));
+        }
+        if let Some((a, g)) = &self.admin {
+            out.extend_from_slice(&digest_to_bytes(a));
+            out.extend_from_slice(&digest_to_bytes(g));
         }
         out
     }
@@ -206,13 +247,23 @@ impl PublicInputs {
         }
         let commitment = digest_from_bytes(&b[..DIGEST_BYTES])?;
         let epoch = u64::from_le_bytes(b[DIGEST_BYTES..DIGEST_BYTES + 8].try_into().unwrap());
-        let c_new = match kind {
-            Kind::Membership => None,
-            // epoch_old + 1 must not wrap.
-            Kind::Update if epoch == u64::MAX => return None,
-            Kind::Update => Some(digest_from_bytes(&b[DIGEST_BYTES + 8..])?),
+        let mut at = DIGEST_BYTES + 8;
+        let mut digest = || {
+            let d = digest_from_bytes(&b[at..at + DIGEST_BYTES]);
+            at += DIGEST_BYTES;
+            d
         };
-        Some(PublicInputs { commitment, epoch, c_new })
+        let c_new = if kind.has_update() {
+            // epoch_old + 1 must not wrap.
+            if epoch == u64::MAX {
+                return None;
+            }
+            Some(digest()?)
+        } else {
+            None
+        };
+        let admin = if kind.has_admin() { Some((digest()?, digest()?)) } else { None };
+        Some(PublicInputs { commitment, epoch, c_new, admin })
     }
 }
 
@@ -320,7 +371,7 @@ pub fn eval<A: Algebra>(
         out.push(s[i] - A::from(pi.commitment[i]));
     }
 
-    if shape.kind == Kind::Update {
+    if shape.kind.has_update() {
         let c_new = pi.c_new.expect("update public inputs carry c_new");
         // ---- epoch2 link: next = root_new ‖ limbs(epoch+1) ‖ 0⁵ -----
         let limbs = epoch_limbs(pi.epoch + 1);
@@ -342,21 +393,60 @@ pub fn eval<A: Algebra>(
             out.push(s[i] - A::from(c_new[i]));
         }
     }
+
+    if shape.kind.has_admin() {
+        let (admin_comm, gid) = pi.admin.expect("admin public inputs carry (admin_comm, group_id)");
+        let carry = &local[COL_CARRY..COL_CARRY + DIGEST];
+        let carry_next = &next[COL_CARRY..COL_CARRY + DIGEST];
+        // ---- carry is constant -----------------------------------------
+        for i in 0..DIGEST {
+            out.push(carry_next[i] - carry[i]);
+        }
+        // ---- carry = leaf (block 0 output) -----------------------------
+        for i in 0..DIGEST {
+            out.push(carry[i] - s[i]);
+        }
+        // ---- admin link: next = carry ‖ group_id -----------------------
+        for i in 0..DIGEST {
+            out.push(next[i] - carry[i]);
+        }
+        for i in 0..DIGEST {
+            out.push(next[DIGEST + i] - A::from(gid[i]));
+        }
+        // ---- admin_comm boundary ---------------------------------------
+        for i in 0..DIGEST {
+            out.push(s[i] - A::from(admin_comm[i]));
+        }
+    }
     debug_assert_eq!(out.len(), num_constraints(shape.kind));
 }
 
-/// Group boundaries into the `eval` output; index = divisor id.
-const GROUPS_MEMBERSHIP: [(usize, usize); 6] = [(0, 16), (16, 33), (33, 49), (49, 65), (65, 73), (73, 81)];
-const GROUPS_UPDATE: [(usize, usize); 9] =
-    [(0, 16), (16, 33), (33, 49), (49, 65), (65, 73), (73, 81), (81, 89), (89, 105), (105, 113)];
+/// Constraint groups as `(start, end, divisor id)` into the `eval` output.
+const GROUPS_MEMBERSHIP: [(usize, usize, usize); 6] =
+    [(0, 16, 0), (16, 33, 1), (33, 49, 2), (49, 65, 3), (65, 73, 4), (73, 81, 5)];
+const GROUPS_UPDATE: [(usize, usize, usize); 9] = [
+    (0, 16, 0), (16, 33, 1), (33, 49, 2), (49, 65, 3), (65, 73, 4), (73, 81, 5),
+    (81, 89, 6), (89, 105, 7), (105, 113, 8),
+];
+const GROUPS_ADMIN_CREATE: [(usize, usize, usize); 10] = [
+    (0, 16, 0), (16, 33, 1), (33, 49, 2), (49, 65, 3), (65, 73, 4), (73, 81, 5),
+    (81, 89, 0), (89, 97, 9), (97, 113, 10), (113, 121, 11),
+];
+const GROUPS_ADMIN_UPDATE: [(usize, usize, usize); 13] = [
+    (0, 16, 0), (16, 33, 1), (33, 49, 2), (49, 65, 3), (65, 73, 4), (73, 81, 5),
+    (81, 89, 6), (89, 105, 7), (105, 113, 8),
+    (113, 121, 0), (121, 129, 9), (129, 145, 10), (145, 153, 11),
+];
 
-pub fn groups(kind: Kind) -> &'static [(usize, usize)] {
+pub fn groups(kind: Kind) -> &'static [(usize, usize, usize)] {
     match kind {
         Kind::Membership => &GROUPS_MEMBERSHIP,
         Kind::Update => &GROUPS_UPDATE,
+        Kind::AdminCreate => &GROUPS_ADMIN_CREATE,
+        Kind::AdminUpdate => &GROUPS_ADMIN_UPDATE,
     }
 }
-pub const NUM_GROUPS_MAX: usize = 9;
+pub const NUM_DIVISORS: usize = 12;
 pub const G_ROUND: usize = 0;
 pub const G_MERKLE: usize = 1;
 pub const G_EPOCH: usize = 2;
@@ -367,16 +457,19 @@ pub const G_EPOCH2: usize = 6;
 pub const G_SALT2: usize = 7;
 pub const G_COMMIT2: usize = 8;
 
-/// Divisor of each group at `x`, given `xⁿ` and the trace generator `g`.
-/// Update-only slots are `1` for membership (never used).
-pub fn divisors<A: Algebra>(shape: &Shape, x: A, x_n: A, g: F) -> [A; NUM_GROUPS_MAX] {
+/// Every divisor at `x`, given `xⁿ` and the trace generator `g`, indexed
+/// by the divisor ids in [`groups`]. Slots a statement doesn't use are `1`.
+pub fn divisors<A: Algebra>(shape: &Shape, x: A, x_n: A, g: F) -> [A; NUM_DIVISORS] {
     let gp = |row: usize| A::from(g.pow(row as u64));
     let mut merkle = A::ONE;
     for b in 0..shape.depth {
         merkle = merkle * (x - gp(shape.link_row(b)));
     }
-    let update = shape.kind == Kind::Update;
+    let update = shape.kind.has_update();
+    let admin = shape.kind.has_admin();
     let at = |block: usize| if update { x - gp(shape.link_row(block)) } else { A::ONE };
+    let at_admin = |row: usize| if admin { x - gp(row) } else { A::ONE };
+    let ab = shape.admin_block();
     [
         x_n - A::ONE,
         merkle,
@@ -387,6 +480,9 @@ pub fn divisors<A: Algebra>(shape: &Shape, x: A, x_n: A, g: F) -> [A; NUM_GROUPS
         at(shape.depth + 2),
         at(shape.depth + 3),
         at(shape.depth + 4),
+        at_admin(shape.link_row(0)),
+        at_admin(shape.link_row(ab.saturating_sub(1))),
+        at_admin(shape.link_row(ab)),
     ]
 }
 
@@ -399,6 +495,8 @@ pub struct Witness {
     pub epoch: u64,
     /// `Some` for an update: the new commitment's private preimage.
     pub update: Option<UpdateWitness>,
+    /// `Some(group_id)` for the admin (tyranny) statements.
+    pub admin_group: Option<[F; DIGEST]>,
 }
 
 pub struct UpdateWitness {
@@ -431,11 +529,18 @@ impl Witness {
     }
 
     pub fn kind(&self) -> Kind {
-        if self.update.is_some() {
-            Kind::Update
-        } else {
-            Kind::Membership
+        match (self.update.is_some(), self.admin_group.is_some()) {
+            (false, false) => Kind::Membership,
+            (true, false) => Kind::Update,
+            (false, true) => Kind::AdminCreate,
+            (true, true) => Kind::AdminUpdate,
         }
+    }
+
+    pub fn leaf(&self) -> [F; DIGEST] {
+        let mut input = [F::ZERO; WIDTH];
+        input[..DIGEST].copy_from_slice(&self.sk);
+        poseidon2::permute(input)[..DIGEST].try_into().unwrap()
     }
 
     pub fn public_inputs(&self) -> PublicInputs {
@@ -443,15 +548,23 @@ impl Witness {
             commitment: commitment(&self.root(), self.epoch, &self.salt),
             epoch: self.epoch,
             c_new: self.update.as_ref().map(|u| commitment(&u.root_new, self.epoch + 1, &u.salt_new)),
+            admin: self.admin_group.map(|g| (poseidon2::compress(&self.leaf(), &g), g)),
         }
     }
 
-    /// Row-major trace, `n × NUM_COLS`.
-    pub fn trace(&self, shape: &Shape) -> Vec<[F; NUM_COLS]> {
+    /// Row-major trace, `n × MAX_COLS` (columns past `shape.num_cols()`
+    /// are zero and not committed).
+    pub fn trace(&self, shape: &Shape) -> Vec<[F; MAX_COLS]> {
         let d = shape.depth;
         assert_eq!(self.path.len(), d);
         assert_eq!(self.kind(), shape.kind);
-        let mut rows = alloc::vec![[F::ZERO; NUM_COLS]; shape.n()];
+        let mut rows = alloc::vec![[F::ZERO; MAX_COLS]; shape.n()];
+        if self.admin_group.is_some() {
+            let leaf = self.leaf();
+            for row in rows.iter_mut() {
+                row[COL_CARRY..COL_CARRY + DIGEST].copy_from_slice(&leaf);
+            }
+        }
         let mut input = [F::ZERO; WIDTH];
         input[..DIGEST].copy_from_slice(&self.sk);
         for b in 0..shape.blocks() {
@@ -483,6 +596,11 @@ impl Witness {
                 link[COL_SIB..COL_SIB + DIGEST].copy_from_slice(&u.salt_new);
                 input[..DIGEST].copy_from_slice(&out);
                 input[DIGEST..].copy_from_slice(&u.salt_new);
+            }
+            // Admin block: H(leaf ‖ group_id), fed from the block before it.
+            if let (Some(g), true) = (&self.admin_group, b + 1 == shape.admin_block()) {
+                input[..DIGEST].copy_from_slice(&self.leaf());
+                input[DIGEST..].copy_from_slice(g);
             }
             // Otherwise the next block is padding with a zero input.
         }

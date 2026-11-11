@@ -154,6 +154,17 @@ bench_gen_pq_anarchy_bundle() {
         --out-dir "$4" >&2
 }
 
+# bench_gen_pq_tyranny_bundle <depth> <group> <seed> <out_dir>
+# Chained pq/sep-tyranny create / membership / update bundle at the Pq100
+# profile; see pq/sha-fri/src/bin/gen_pq_tyranny_bundle.rs for layout.
+bench_gen_pq_tyranny_bundle() {
+    "$BENCH_PQ_TYRANNY_BUNDLE_BIN" \
+        --depth "$1" \
+        --group "$2" \
+        --seed "$3" \
+        --out-dir "$4" >&2
+}
+
 # ---------- invocation + fee capture ----------
 
 # capture_tx_hashes <stderr_logfile>

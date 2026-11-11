@@ -69,23 +69,46 @@ stellar keys fund "$BENCH_DEPLOYER" \
     --network "$BENCH_NETWORK" >/dev/null 2>&1 || \
     echo "    (friendbot returned non-zero; proceeding — account may already be funded)"
 
-echo "==> building pq/sep-anarchy (default + conjectured profiles)"
-mkdir -p "$BENCH_ARTIFACT_DIR/conjectured"
-stellar contract build \
-    --manifest-path "$REPO_ROOT/pq/sep-anarchy/Cargo.toml" \
-    --out-dir "$BENCH_ARTIFACT_DIR" >/dev/null
-stellar contract build \
-    --manifest-path "$REPO_ROOT/pq/sep-anarchy/Cargo.toml" \
-    --features conjectured \
-    --out-dir "$BENCH_ARTIFACT_DIR/conjectured" >/dev/null
+# Build only what the requested drivers need (default: pq-sep-anarchy).
+REQUESTED="${*:-pq-sep-anarchy}"
+want() { case " $REQUESTED " in *" $1 "*) return 0 ;; esac; return 1; }
+mkdir -p "$BENCH_ARTIFACT_DIR"
 
-echo "==> building gen-pq-anarchy-bundle"
-cargo build \
-    --manifest-path "$REPO_ROOT/pq/sha-fri/Cargo.toml" \
-    --release \
-    --features prover \
-    --bin gen-pq-anarchy-bundle >/dev/null
-export BENCH_PQ_BUNDLE_BIN="$REPO_ROOT/pq/sha-fri/target/release/gen-pq-anarchy-bundle"
+if want pq-sep-anarchy; then
+    echo "==> building pq/sep-anarchy (default + conjectured profiles)"
+    mkdir -p "$BENCH_ARTIFACT_DIR/conjectured"
+    stellar contract build \
+        --manifest-path "$REPO_ROOT/pq/sep-anarchy/Cargo.toml" \
+        --out-dir "$BENCH_ARTIFACT_DIR" >/dev/null
+    stellar contract build \
+        --manifest-path "$REPO_ROOT/pq/sep-anarchy/Cargo.toml" \
+        --features conjectured \
+        --out-dir "$BENCH_ARTIFACT_DIR/conjectured" >/dev/null
+
+    echo "==> building gen-pq-anarchy-bundle"
+    cargo build \
+        --manifest-path "$REPO_ROOT/pq/sha-fri/Cargo.toml" \
+        --release \
+        --features prover \
+        --bin gen-pq-anarchy-bundle >/dev/null
+    export BENCH_PQ_BUNDLE_BIN="$REPO_ROOT/pq/sha-fri/target/release/gen-pq-anarchy-bundle"
+fi
+
+if want pq-sep-tyranny; then
+    echo "==> building pq/sep-tyranny (Pq100 profile)"
+    stellar contract build \
+        --manifest-path "$REPO_ROOT/pq/sep-tyranny/Cargo.toml" \
+        --out-dir "$BENCH_ARTIFACT_DIR" >/dev/null
+
+    # ext8 changes the field type, so this binary is built separately.
+    echo "==> building gen-pq-tyranny-bundle"
+    cargo build \
+        --manifest-path "$REPO_ROOT/pq/sha-fri/Cargo.toml" \
+        --release \
+        --features prover,ext8 \
+        --bin gen-pq-tyranny-bundle >/dev/null
+    export BENCH_PQ_TYRANNY_BUNDLE_BIN="$REPO_ROOT/pq/sha-fri/target/release/gen-pq-tyranny-bundle"
+fi
 
 echo "==> setup complete"
 

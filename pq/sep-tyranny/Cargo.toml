@@ -1,0 +1,34 @@
+[package]
+name = "pq-sep-tyranny-contract"
+version = "0.1.0"
+edition = "2021"
+description = "Soroban smart contract for SEP Tyranny (PQ flavor): per-type single-admin governance, verified by zero-knowledge SHA-256 STARKs from pq/sha-fri at ~100-bit post-quantum parameters (Pq100 profile, degree-8 challenge field). Same entrypoint shape as plonk/sep-tyranny."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { version = "=26.0.0", features = ["alloc"] }
+# `ext8`: degree-8 challenge field, required for post-quantum parameters.
+sha-fri = { path = "../sha-fri", features = ["ext8"] }
+
+[dev-dependencies]
+soroban-sdk = { version = "=26.0.0", features = ["alloc", "testutils"] }
+sha-fri = { path = "../sha-fri", features = ["prover", "ext8"] }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

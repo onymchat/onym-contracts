@@ -30,8 +30,8 @@
 //! 3. **FRI** on `f` with degree bound `2n`, as in the v0 prototype, on
 //!    the coset `SHIFT·⟨ω⟩`.
 
-use crate::air::{self, PublicInputs, Shape, NUM_COLS, NUM_PERIODIC};
-use crate::field::{Algebra, E, E_BYTES, F};
+use crate::air::{self, PublicInputs, Shape, NUM_PERIODIC};
+use crate::field::{Algebra, E, E_BYTES, EXT_DEG, F};
 use crate::fold::fold_leaf;
 use crate::hash::{Digest, Hasher};
 use crate::merkle::verify_path;
@@ -121,18 +121,18 @@ pub fn combine_constraints<A: Algebra>(
     shape: &Shape,
     numerators: &[A],
     alpha_pows: &[E],
-    divisor_invs: &[A; air::NUM_GROUPS_MAX],
+    divisor_invs: &[A; air::NUM_DIVISORS],
 ) -> E
 where
     E: From<A>,
 {
     let mut total = E::ZERO;
-    for (g, &(start, end)) in air::groups(shape.kind).iter().enumerate() {
+    for &(start, end, div) in air::groups(shape.kind) {
         let mut acc = E::ZERO;
         for i in start..end {
             acc = acc + alpha_pows[i] * E::from(numerators[i]);
         }
-        total = total + acc * E::from(divisor_invs[g]);
+        total = total + acc * E::from(divisor_invs[div]);
     }
     total
 }
@@ -174,8 +174,8 @@ pub fn air_check_at_z(
     let mut zjn = E::ONE;
     for j in 0..p.num_quotient_chunks() {
         let mut chunk = E::ZERO;
-        for k in 0..4 {
-            chunk = chunk + times_x_pow(ood_q[4 * j + k], k);
+        for k in 0..EXT_DEG {
+            chunk = chunk + times_x_pow(ood_q[EXT_DEG * j + k], k);
         }
         rhs = rhs + zjn * chunk;
         zjn = zjn * z_n;
@@ -200,10 +200,14 @@ pub struct DeepCoeffs {
     pub gamma_pows: Vec<E>,
     pub a_z: E,
     pub a_gz: E,
+    pub num_cols: usize,
 }
 
+/// `ood_z` / `ood_gz` hold one value per trace column (their length is
+/// the statement's column count).
 pub fn deep_coeffs(gamma: E, ood_z: &[E], ood_gz: &[E], ood_q: &[E]) -> DeepCoeffs {
-    let count = 2 * NUM_COLS + ood_q.len();
+    let num_cols = ood_z.len();
+    let count = 2 * num_cols + ood_q.len();
     let mut gamma_pows = Vec::with_capacity(count);
     let mut g = E::ONE;
     for _ in 0..count {
@@ -212,28 +216,28 @@ pub fn deep_coeffs(gamma: E, ood_z: &[E], ood_gz: &[E], ood_q: &[E]) -> DeepCoef
     }
     let mut a_z = E::ZERO;
     let mut a_gz = E::ZERO;
-    for c in 0..NUM_COLS {
+    for c in 0..num_cols {
         a_z = a_z + gamma_pows[2 * c] * ood_z[c];
         a_gz = a_gz + gamma_pows[2 * c + 1] * ood_gz[c];
     }
     for (q, v) in ood_q.iter().enumerate() {
-        a_z = a_z + gamma_pows[2 * NUM_COLS + q] * *v;
+        a_z = a_z + gamma_pows[2 * num_cols + q] * *v;
     }
-    DeepCoeffs { gamma_pows, a_z, a_gz }
+    DeepCoeffs { gamma_pows, a_z, a_gz, num_cols }
 }
 
 impl DeepCoeffs {
     /// DEEP value at LDE point `x` from that point's trace row, quotient
     /// chunk columns and mask columns.
-    pub fn eval(&self, x: F, z: E, gz: E, trace: &[F], quot: &[F], mask: [F; 4]) -> E {
+    pub fn eval(&self, x: F, z: E, gz: E, trace: &[F], quot: &[F], mask: [F; EXT_DEG]) -> E {
         let mut sum_z = E::ZERO;
         let mut sum_gz = E::ZERO;
-        for c in 0..NUM_COLS {
+        for c in 0..self.num_cols {
             sum_z = sum_z + self.gamma_pows[2 * c].mul_base(trace[c]);
             sum_gz = sum_gz + self.gamma_pows[2 * c + 1].mul_base(trace[c]);
         }
         for (q, v) in quot.iter().enumerate() {
-            sum_z = sum_z + self.gamma_pows[2 * NUM_COLS + q].mul_base(*v);
+            sum_z = sum_z + self.gamma_pows[2 * self.num_cols + q].mul_base(*v);
         }
         let xe = E::from_base(x);
         (sum_z - self.a_z) * (xe - z).inv() + (sum_gz - self.a_gz) * (xe - gz).inv() + E(mask)
@@ -249,8 +253,9 @@ pub fn verify<H: Hasher>(
     let p = Params::from_bytes(params_bytes).map_err(|_| VerifyError::BadParams)?;
     let pi = PublicInputs::from_bytes(p.kind, public_inputs).ok_or(VerifyError::BadPublicInputs)?;
     let k = p.num_layers();
+    let num_cols = p.shape().num_cols();
     let qcols = p.quotient_cols();
-    let chunk_cols = 4 * p.num_quotient_chunks();
+    let chunk_cols = EXT_DEG * p.num_quotient_chunks();
     let mut r = Reader { buf: proof, pos: 0 };
     let mut t = Transcript::new(h, TRANSCRIPT_LABEL);
     t.observe(params_bytes);
@@ -264,11 +269,11 @@ pub fn verify<H: Hasher>(
     t.observe(&digest_bytes(&quot_cap));
     let z = t.challenge_ext();
 
-    let ood_raw = r.take((2 * NUM_COLS + chunk_cols) * E_BYTES)?;
+    let ood_raw = r.take((2 * num_cols + chunk_cols) * E_BYTES)?;
     let ood = exts(ood_raw)?;
     t.observe(ood_raw);
-    let (ood_z, rest) = ood.split_at(NUM_COLS);
-    let (ood_gz, ood_q) = rest.split_at(NUM_COLS);
+    let (ood_z, rest) = ood.split_at(num_cols);
+    let (ood_gz, ood_q) = rest.split_at(num_cols);
 
     let (lhs, rhs) = air_check_at_z(&p, &pi, z, alpha, ood_z, ood_gz, ood_q);
     if lhs != rhs {
@@ -315,14 +320,14 @@ pub fn verify<H: Hasher>(
     let m0 = 1usize << p.log_arities[0];
     let path0 = (p.log_leaves(0) - p.cap_height_at(0)) as usize;
     let mut vals: Vec<E> = Vec::with_capacity(1 << 4);
-    let mut trace_row = [F::ZERO; NUM_COLS];
+    let mut trace_row = alloc::vec![F::ZERO; num_cols];
     let mut quot_row: Vec<F> = alloc::vec![F::ZERO; qcols];
 
     // ---- Queries ----------------------------------------------------
     for _ in 0..p.num_queries {
         let mut pos = t.challenge_index(p.log_leaves(0));
 
-        let t_leaf = r.take(LEAF_SALT + m0 * NUM_COLS * 4)?;
+        let t_leaf = r.take(LEAF_SALT + m0 * num_cols * 4)?;
         let t_path = r.digests(path0)?;
         if !verify_path(h, t_leaf, pos, &t_path, &trace_cap) {
             return Err(VerifyError::MerkleMismatch { layer: 0 });
@@ -335,16 +340,16 @@ pub fn verify<H: Hasher>(
 
         vals.clear();
         let mut x = shift[0] * omega[0].pow(pos as u64);
-        let t_rows = t_leaf[LEAF_SALT..].chunks_exact(NUM_COLS * 4);
+        let t_rows = t_leaf[LEAF_SALT..].chunks_exact(num_cols * 4);
         let q_rows = q_leaf[LEAF_SALT..].chunks_exact(qcols * 4);
         for (t_row, q_row) in t_rows.zip(q_rows) {
-            for c in 0..NUM_COLS {
+            for c in 0..num_cols {
                 trace_row[c] = base_at(t_row, c)?;
             }
             for c in 0..qcols {
                 quot_row[c] = base_at(q_row, c)?;
             }
-            let mask: [F; 4] = quot_row[chunk_cols..].try_into().unwrap();
+            let mask: [F; EXT_DEG] = quot_row[chunk_cols..].try_into().unwrap();
             vals.push(deep.eval(x, z, gz, &trace_row, &quot_row[..chunk_cols], mask));
             x = x * zeta[0];
         }
