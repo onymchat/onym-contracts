@@ -1,10 +1,10 @@
 //! `cargo run --release -- <path/to/pq_sha_fri_bench_contract.wasm>`
 //!
-//! For each preset: prove (timed), verify natively, then invoke the
-//! bench contract's `verify` in a metered host and record CPU
-//! instructions and memory bytes. Caps are the live futurenet/testnet
-//! values (`contract_compute_v0`, `contract_bandwidth_v0`, read
-//! 2026-11-11 via getLedgerEntries).
+//! For each preset: build a random membership witness, prove (timed),
+//! verify natively, then invoke the bench contract's `verify` in a
+//! metered host and record CPU instructions and memory bytes. Caps are
+//! the live futurenet/testnet values (`contract_compute_v0`,
+//! `contract_bandwidth_v0`, read 2026-11-11 via getLedgerEntries).
 
 use sha_fri::hash::Sha2Hasher;
 use sha_fri::params::Params;
@@ -21,39 +21,43 @@ struct Preset {
     params: Params,
 }
 
-fn preset(
-    name: &'static str,
-    log_trace_rows: u8,
-    num_cols: u16,
-    log_blowup: u8,
-    num_queries: u16,
-    grind_bits: u8,
-    log_arities: &[u8],
-) -> Preset {
-    Preset {
-        name,
-        params: Params {
-            log_trace_rows,
-            num_cols,
-            log_blowup,
-            num_queries,
-            grind_bits,
-            cap_height: 4,
-            log_arities: log_arities.to_vec(),
-        },
+/// Layer-0 arity 2, then arity 8 until the final polynomial is a constant.
+fn arities(log_n0: u32, log_blowup: u8) -> Vec<u8> {
+    let mut rem = log_n0 - 1 - log_blowup as u32;
+    let mut out = vec![1u8];
+    while rem > 0 {
+        let a = rem.min(3);
+        out.push(a as u8);
+        rem -= a;
     }
+    out
+}
+
+fn preset(name: &'static str, depth: u8, log_blowup: u8, num_queries: u16, grind_bits: u8) -> Preset {
+    let mut params = Params {
+        depth,
+        // Minimum for hiding: every revealed evaluation is covered.
+        mask_degree: num_queries * 2 + 2,
+        log_blowup,
+        num_queries,
+        grind_bits,
+        cap_height: 4,
+        log_arities: vec![1],
+    };
+    params.log_arities = arities(params.log_n0(), log_blowup);
+    params.validate().unwrap_or_else(|_| panic!("{name}: invalid params"));
+    Preset { name, params }
 }
 
 fn presets() -> Vec<Preset> {
     vec![
-        // ~2^9 rows × 48 cols: a row-per-round Poseidon2 AIR over 11
-        // Merkle levels (sep-anarchy depth 11) plus quotient chunks.
-        preset("membership d11, conjectured", 9, 48, 4, 20, 20, &[1, 3, 3]),
-        preset("membership d11, Johnson", 9, 48, 4, 40, 20, &[1, 3, 3]),
-        preset("4× circuit (2^11 rows), Johnson", 11, 48, 4, 40, 20, &[1, 3, 3, 3]),
-        preset("32× circuit (2^14 rows), Johnson", 14, 48, 4, 40, 20, &[1, 3, 3, 3, 3]),
-        preset("rate 1/2 (blowup 2), conjectured", 9, 48, 1, 80, 20, &[1, 3, 3]),
-        preset("wide trace (400 cols), Johnson", 5, 400, 4, 40, 20, &[1, 3]),
+        preset("d5, blowup 16, conjectured", 5, 4, 20, 20),
+        preset("d8, blowup 16, conjectured", 8, 4, 20, 20),
+        preset("d11, blowup 16, conjectured", 11, 4, 20, 20),
+        preset("d5, blowup 16, Johnson", 5, 4, 40, 20),
+        preset("d8, blowup 16, Johnson", 8, 4, 40, 20),
+        preset("d11, blowup 16, Johnson", 11, 4, 40, 20),
+        preset("d11, blowup 8, Johnson", 11, 3, 54, 20),
     ]
 }
 
@@ -84,17 +88,18 @@ fn pct(x: u64, cap: u64) -> String {
 fn main() {
     let wasm_path = std::env::args().nth(1).expect("usage: pq-sha-fri-runner <bench.wasm>");
     let wasm = std::fs::read(&wasm_path).expect("read wasm");
-    let pi = [0x42u8; 32];
 
-    println!("| Preset | Trace | Blowup | Queries | Grind | Security (conj / Johnson) | Proof bytes | % tx size | CPU insns | % CPU cap | Mem bytes | % mem cap | Prove ms |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("| Preset | Trace rows | Quotient chunks | Queries | Security (conj / Johnson) | Proof bytes | % tx size | CPU insns | % CPU cap | Mem bytes | % mem cap | Prove ms |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
 
     for (i, pr) in presets().into_iter().enumerate() {
         let p = &pr.params;
         let pb = p.to_bytes();
+        let w = prover::random_witness(p.depth as usize, 0x5eed + i as u64);
+        let pi = w.public_inputs().to_bytes();
 
         let t0 = Instant::now();
-        let proof = prover::prove(&Sha2Hasher, p, &pi, 0x5eed + i as u64);
+        let proof = prover::prove(&Sha2Hasher, p, &w, 0xC0FFEE + i as u64);
         let prove_ms = t0.elapsed().as_millis();
 
         verifier::verify(&Sha2Hasher, &pb, &proof, &pi).expect("native verify");
@@ -108,13 +113,11 @@ fn main() {
         let tx_bytes = proof.len() + pb.len() + pi.len() + 1024;
 
         println!(
-            "| {} | 2^{} × {} | {} | {} | {} | {} / {} bits | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} / {} bits | {} | {} | {} | {} | {} | {} | {} |",
             pr.name,
-            p.log_trace_rows,
-            p.num_cols,
-            1u32 << p.log_blowup,
+            p.n(),
+            p.num_quotient_chunks(),
             p.num_queries,
-            p.grind_bits,
             p.conjectured_security_bits(),
             p.johnson_security_bits(),
             proof.len(),
@@ -127,14 +130,17 @@ fn main() {
         );
 
         if i == 0 {
-            // Rejection path: flip one byte inside the query section.
+            // Rejection paths on-chain: tampered query bytes, wrong epoch.
             let mut bad = proof.clone();
             let at = bad.len() - 200;
             bad[at] ^= 1;
-            let env = Env::default();
-            let r = invoke(&env, &wasm, &pb, &bad, &pi);
+            let r = invoke(&Env::default(), &wasm, &pb, &bad, &pi);
             assert!(!r.ok, "tampered proof accepted on-chain");
-            eprintln!("tamper check: rejected on-chain ({} insns)", r.cpu);
+            let mut wrong_pi = pi;
+            wrong_pi[32] ^= 1;
+            let r2 = invoke(&Env::default(), &wasm, &pb, &proof, &wrong_pi);
+            assert!(!r2.ok, "wrong epoch accepted on-chain");
+            eprintln!("rejections on-chain: tampered ({} insns), wrong epoch ({} insns)", r.cpu, r2.cpu);
         }
     }
 }

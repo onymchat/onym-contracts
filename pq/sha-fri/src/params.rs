@@ -1,30 +1,37 @@
-//! Verifier parameters (the VK-equivalent for this prototype).
+//! Verifier parameters (the VK-equivalent for the membership AIR).
 //!
-//! ## Domains
+//! ## Degrees
 //!
-//! The trace has `2^log_trace_rows` rows and `num_cols` base-field
-//! columns, low-degree-extended to `n₀ = 2^(log_trace_rows +
-//! log_blowup)`. Layer `j` folds a domain of size `n_j` by arity
-//! `2^log_arities[j]`. Layer 0 is the trace commitment itself (the
-//! DEEP quotient is computed from opened trace rows, not committed);
-//! layers `1..k` commit FRI codewords. After the last fold the prover
-//! sends the final polynomial's `n_k / blowup` coefficients.
+//! - Trace: `n = 32·blocks` rows (see [`crate::air::Shape`]).
+//! - Zero-knowledge: each trace column is `T + Z_H·R` with `R` random of
+//!   degree `< h` (`mask_degree`), so trace polynomials have degree
+//!   `< n + h ≤ 2n`. Quotient chunks get telescoping randomizers of the
+//!   same degree. FRI therefore tests degree `< 2n`, and the LDE domain is
+//!   `n₀ = 2n · blowup`.
+//! - Hiding needs `h` above the number of evaluations revealed per
+//!   column: `num_queries · 2^log_arities[0]` coset points plus 2 OOD
+//!   points.
+//! - The round constraint has degree `≤ 7(n + h − 1) + 31·n/32` (S-box ×
+//!   periodic selector). Dividing by `xⁿ − 1` leaves the quotient, split
+//!   into `num_quotient_chunks()` pieces of `n` coefficients.
 //!
 //! ## Wire format
 //!
-//! `[version=0, log_trace_rows, num_cols: u16 LE, log_blowup,
+//! `[version=1, depth, mask_degree: u16 LE, log_blowup,
 //!   num_queries: u16 LE, grind_bits, cap_height, k, log_arities[k]]`
 
+use crate::air::{Shape, BLOCK};
 use alloc::vec::Vec;
 
-const VERSION: u8 = 0;
+const VERSION: u8 = 1;
 const HEADER_LEN: usize = 10;
 const MAX_LOG_ARITY: u8 = 4;
+const MAX_DEPTH: u8 = 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Params {
-    pub log_trace_rows: u8,
-    pub num_cols: u16,
+    pub depth: u8,
+    pub mask_degree: u16,
     pub log_blowup: u8,
     pub num_queries: u16,
     pub grind_bits: u8,
@@ -39,8 +46,8 @@ impl Params {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(HEADER_LEN + self.log_arities.len());
         out.push(VERSION);
-        out.push(self.log_trace_rows);
-        out.extend_from_slice(&self.num_cols.to_le_bytes());
+        out.push(self.depth);
+        out.extend_from_slice(&self.mask_degree.to_le_bytes());
         out.push(self.log_blowup);
         out.extend_from_slice(&self.num_queries.to_le_bytes());
         out.push(self.grind_bits);
@@ -59,8 +66,8 @@ impl Params {
             return Err(BadParams);
         }
         let p = Params {
-            log_trace_rows: b[1],
-            num_cols: u16::from_le_bytes([b[2], b[3]]),
+            depth: b[1],
+            mask_degree: u16::from_le_bytes([b[2], b[3]]),
             log_blowup: b[4],
             num_queries: u16::from_le_bytes([b[5], b[6]]),
             grind_bits: b[7],
@@ -72,16 +79,24 @@ impl Params {
     }
 
     pub fn validate(&self) -> Result<(), BadParams> {
+        if !(1..=MAX_DEPTH).contains(&self.depth)
+            || self.log_blowup < 1
+            || self.num_queries < 1
+            || self.grind_bits > 32
+            || self.log_arities.is_empty()
+            || !self.log_arities.iter().all(|&a| (1..=MAX_LOG_ARITY).contains(&a))
+        {
+            return Err(BadParams);
+        }
         let folded: u32 = self.log_arities.iter().map(|&a| a as u32).sum();
-        let ok = self.num_cols >= 1
-            && self.log_blowup >= 1
-            && self.num_queries >= 1
-            && self.grind_bits <= 32
-            && !self.log_arities.is_empty()
-            && self.log_arities.iter().all(|&a| (1..=MAX_LOG_ARITY).contains(&a))
-            && self.log_n0() <= crate::field::TWO_ADICITY
-            // The final polynomial must keep at least one coefficient.
-            && folded + self.log_blowup as u32 <= self.log_n0();
+        let h = self.mask_degree as usize;
+        let revealed = self.num_queries as usize * (1 << self.log_arities[0]) + 2;
+        let ok = self.log_n0() <= crate::field::TWO_ADICITY
+            && folded + self.log_blowup as u32 <= self.log_n0()
+            && h >= revealed
+            && h <= self.n()
+            && self.max_constraint_degree() < self.n0()
+            && self.num_quotient_chunks() * self.n() <= self.n0();
         if ok {
             Ok(())
         } else {
@@ -89,22 +104,61 @@ impl Params {
         }
     }
 
+    pub fn shape(&self) -> Shape {
+        Shape::new(self.depth as usize)
+    }
+
+    pub fn n(&self) -> usize {
+        self.shape().n()
+    }
+
+    pub fn log_n(&self) -> u32 {
+        self.shape().log_n()
+    }
+
+    /// FRI degree bound `2n` (trace + mask degree fits under it).
+    pub fn log_fri_bound(&self) -> u32 {
+        self.log_n() + 1
+    }
+
+    pub fn log_n0(&self) -> u32 {
+        self.log_fri_bound() + self.log_blowup as u32
+    }
+
+    pub fn n0(&self) -> usize {
+        1 << self.log_n0()
+    }
+
+    pub fn max_constraint_degree(&self) -> usize {
+        let n = self.n();
+        let periodic = (n / BLOCK) * (BLOCK - 1);
+        7 * (n + self.mask_degree as usize - 1) + periodic
+    }
+
+    pub fn num_quotient_chunks(&self) -> usize {
+        let n = self.n();
+        let q_deg = self.max_constraint_degree() - n;
+        (q_deg + 1).div_ceil(n)
+    }
+
+    /// Columns in the quotient tree: `4 × chunks` (each extension-valued
+    /// chunk as four base polynomials) + 4 for the FRI mask polynomial.
+    pub fn quotient_cols(&self) -> usize {
+        4 * self.num_quotient_chunks() + 4
+    }
+
     pub fn num_layers(&self) -> usize {
         self.log_arities.len()
     }
 
-    pub fn log_n0(&self) -> u32 {
-        self.log_trace_rows as u32 + self.log_blowup as u32
-    }
-
-    /// log₂ of the evaluation-domain size at layer `j` (`j ≤ k`).
-    pub fn log_n(&self, j: usize) -> u32 {
+    /// log₂ of the evaluation-domain size at FRI layer `j` (`j ≤ k`).
+    pub fn log_layer(&self, j: usize) -> u32 {
         self.log_n0() - self.log_arities[..j].iter().map(|&a| a as u32).sum::<u32>()
     }
 
     /// log₂ of the number of Merkle leaves (= cosets) at layer `j < k`.
     pub fn log_leaves(&self, j: usize) -> u32 {
-        self.log_n(j) - self.log_arities[j] as u32
+        self.log_layer(j) - self.log_arities[j] as u32
     }
 
     /// Effective cap height at layer `j`: never taller than the tree.
@@ -113,7 +167,7 @@ impl Params {
     }
 
     pub fn final_poly_len(&self) -> usize {
-        1 << (self.log_n(self.num_layers()) - self.log_blowup as u32)
+        1 << (self.log_layer(self.num_layers()) - self.log_blowup as u32)
     }
 
     /// Conjectured soundness under the up-to-capacity proximity-gap

@@ -15,19 +15,25 @@
 //!   No host objects per field element.
 //! - **Hash**: SHA-256 for Merkle trees and Fiat–Shamir, via the
 //!   [`hash::Hasher`] trait (host fn on-chain, `sha2` off-chain).
-//! - **PCS shape**: a committed W-column trace opened via a DEEP
-//!   quotient at an out-of-domain point, then FRI with configurable
-//!   per-layer folding arity, Merkle caps, and PoW grinding.
+//! - **Statement**: the membership AIR in [`air`], the PQ analogue of
+//!   the PLONK `MembershipCircuit` (key ownership, private-root Merkle
+//!   opening, epoch + salt commitment), over Poseidon2-BabyBear-16 with
+//!   one trace row per round.
+//! - **Proof system**: DEEP-ALI over a committed trace and quotient
+//!   (SHA-256 Merkle trees with caps and salted leaves), FRI with
+//!   per-layer folding arity, PoW grinding.
+//! - **Zero-knowledge**: masked trace columns, telescoping quotient-chunk
+//!   randomizers, a random FRI mask polynomial and salted leaves (see
+//!   [`prover`]).
 //!
-//! ## What is NOT here (prototype scope)
+//! ## Prototype limits
 //!
-//! - No AIR constraint evaluation at `z`. The verifier checks the
-//!   claimed OOD values are consistent with the committed trace, but
-//!   not that they satisfy any circuit. Constraint evaluation is pure
-//!   extension-field arithmetic at one point, so it adds CPU but no
-//!   hashing and only a few OOD values to the proof.
-//! - Only one OOD point (`z`); a real AIR also opens at `z·g`.
-//! - No Merkle multi-proof de-duplication across queries.
+//! - Poseidon2 constants are nothing-up-my-sleeve, not Plonky3's
+//!   canonical set (see [`poseidon2_constants`]).
+//! - The bench prover's randomness is a seeded xorshift; a real prover
+//!   needs a CSPRNG for the proof to be zero-knowledge.
+//! - Security figures are heuristics, not a soundness calculator.
+//! - No external audit; not wired into a governance contract yet.
 
 #![no_std]
 
@@ -38,8 +44,12 @@ extern crate std;
 pub mod field;
 pub mod fold;
 pub mod hash;
+pub mod air;
 pub mod merkle;
 pub mod params;
+pub mod poly;
+pub mod poseidon2;
+pub mod poseidon2_constants;
 pub mod transcript;
 pub mod verifier;
 

@@ -1,24 +1,33 @@
-//! Bench prover: emits proofs the verifier accepts, with exactly the
-//! production byte layout and transcript.
+//! Prover for the membership AIR, matching `verifier` byte for byte.
 //!
-//! The trace is `num_cols` random polynomials of degree
-//! `< 2^log_trace_rows`, a stand-in for a real AIR trace plus quotient
-//! chunks. Proof size and verifier cost depend only on the shape
-//! (rows × columns × FRI parameters), not on what the columns encode,
-//! so the bench numbers carry over to a real circuit of the same shape.
+//! Zero-knowledge ingredients (see `params` for the degree budget):
+//! - Trace columns `T + Z_H·R`, `R` random of degree `< h`.
+//! - Quotient chunks `Q_j + xⁿ·b_j − b_{j−1}` (telescoping, sum unchanged).
+//! - A random mask polynomial `r` of degree `< 2n` added to the DEEP
+//!   codeword, so FRI layer openings reveal nothing about the trace.
+//! - 16-byte random salt in every trace / quotient Merkle leaf, so
+//!   unopened leaf hashes don't commit to guessable values.
 //!
-//! The final-layer interpolation asserts that every coefficient past
-//! `final_poly_len` is zero. That only holds if NTT, DEEP quotient and
-//! every fold agree with the verifier's maths, so a passing prove is
-//! itself an end-to-end consistency check.
+//! **Bench randomness**: masks and salts come from a seeded xorshift so
+//! runs are reproducible. A production prover must draw them from a
+//! CSPRNG; with a predictable seed the proof is not zero-knowledge.
+//!
+//! Self-checks (panics on failure, so a passing prove is itself an
+//! end-to-end consistency test): the quotient numerator divides exactly
+//! (the AIR holds on the trace), the AIR identity holds at `z`, and the
+//! final FRI codeword is low-degree.
 
+use crate::air::{self, Shape, Witness, NUM_COLS};
 use crate::field::{E, F};
 use crate::fold::fold_leaf;
 use crate::hash::{Digest, Hasher};
 use crate::merkle::{leaf_hash, node_hash};
 use crate::params::Params;
+use crate::poly::{coset_interpolate, coset_lde, eval_base, intt, SHIFT};
 use crate::transcript::Transcript;
-use crate::verifier::TRANSCRIPT_LABEL;
+use crate::verifier::{
+    air_check_at_z, combine_constraints, deep_coeffs, periodic_coeffs, LEAF_SALT, TRANSCRIPT_LABEL,
+};
 use std::vec;
 use std::vec::Vec;
 
@@ -56,57 +65,49 @@ impl Tree {
     }
 }
 
-fn bit_reverse(a: &mut [F]) {
-    let n = a.len();
-    let bits = n.trailing_zeros();
-    for i in 0..n {
-        let j = i.reverse_bits() >> (usize::BITS - bits);
-        if i < j {
-            a.swap(i, j);
-        }
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        // xorshift64*: reproducible bench data, NOT a CSPRNG.
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+    fn f(&mut self) -> F {
+        F::from_u64(self.next())
+    }
+    fn e(&mut self) -> E {
+        E([self.f(), self.f(), self.f(), self.f()])
+    }
+    fn salt(&mut self) -> [u8; LEAF_SALT] {
+        let mut s = [0u8; LEAF_SALT];
+        s[..8].copy_from_slice(&self.next().to_le_bytes());
+        s[8..].copy_from_slice(&self.next().to_le_bytes());
+        s
     }
 }
 
-/// In place: `a[i] ← Σⱼ a[j]·ωⁱʲ` (coefficients → evaluations).
-fn ntt(a: &mut [F], omega: F) {
-    let n = a.len();
-    if n <= 1 {
-        return;
-    }
-    bit_reverse(a);
-    let mut len = 2;
-    while len <= n {
-        let w_len = omega.pow((n / len) as u64);
-        for start in (0..n).step_by(len) {
-            let mut w = F::ONE;
-            for j in 0..len / 2 {
-                let u = a[start + j];
-                let v = a[start + j + len / 2] * w;
-                a[start + j] = u + v;
-                a[start + j + len / 2] = u - v;
-                w = w * w_len;
+/// Merkle leaves for column-major LDE data grouped by layer-0 cosets:
+/// `salt ‖ rows l + t·s for t < m`.
+fn salted_row_leaves(cols: &[Vec<F>], log_leaves: u32, m: usize, rng: &mut Rng) -> Vec<Vec<u8>> {
+    let s = 1usize << log_leaves;
+    (0..s)
+        .map(|l| {
+            let mut b = Vec::with_capacity(LEAF_SALT + m * cols.len() * 4);
+            b.extend_from_slice(&rng.salt());
+            for t in 0..m {
+                for col in cols {
+                    b.extend_from_slice(&col[l + t * s].value().to_le_bytes());
+                }
             }
-        }
-        len <<= 1;
-    }
+            b
+        })
+        .collect()
 }
 
-/// Evaluations over `⟨ω⟩` → coefficients, per extension component.
-fn intt_ext(evals: &[E], omega: F) -> Vec<E> {
-    let n = evals.len();
-    let n_inv = F::from_u64(n as u64).inv();
-    let mut out = vec![E::ZERO; n];
-    for comp in 0..4 {
-        let mut v: Vec<F> = evals.iter().map(|e| e.0[comp]).collect();
-        ntt(&mut v, omega.inv());
-        for i in 0..n {
-            out[i].0[comp] = v[i] * n_inv;
-        }
-    }
-    out
-}
-
-fn fold_layer(cw: &[E], log_n: u32, log_arity: u8, beta: E) -> Vec<E> {
+fn fold_layer(cw: &[E], log_n: u32, log_arity: u8, beta: E, shift: F) -> Vec<E> {
     let n = 1usize << log_n;
     let m = 1usize << log_arity;
     let s = n / m;
@@ -115,7 +116,7 @@ fn fold_layer(cw: &[E], log_n: u32, log_arity: u8, beta: E) -> Vec<E> {
     let zeta_inv = omega.pow(s as u64).inv();
     let two_inv = F::from_u64(2).inv();
     let mut out = Vec::with_capacity(s);
-    let mut x0_inv = F::ONE;
+    let mut x0_inv = shift.inv();
     let mut vals = vec![E::ZERO; m];
     for l in 0..s {
         for t in 0..m {
@@ -131,112 +132,169 @@ fn coset_leaf_bytes(cw: &[E], idx: usize, leaves: usize, arity: usize) -> Vec<u8
     (0..arity).flat_map(|t| cw[idx + t * leaves].to_bytes()).collect()
 }
 
-fn next_rand(state: &mut u64) -> u64 {
-    // xorshift64* — deterministic bench data, not secrets.
-    *state ^= *state >> 12;
-    *state ^= *state << 25;
-    *state ^= *state >> 27;
-    state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+pub fn prove<H: Hasher>(h: &H, p: &Params, w: &Witness, seed: u64) -> Vec<u8> {
+    prove_trace(h, p, &w.public_inputs(), w.trace(&p.shape()), seed)
 }
 
-pub fn prove<H: Hasher>(h: &H, p: &Params, public_inputs: &[u8], seed: u64) -> Vec<u8> {
-    prove_inner(h, p, public_inputs, seed, 1usize << p.log_trace_rows, true)
-}
-
-/// `trace_degree` above `2^log_trace_rows` with `check_final = false`
-/// models a cheating prover that commits a too-high-degree trace and
-/// truncates the final polynomial.
-fn prove_inner<H: Hasher>(
+/// Proves an explicit trace against explicit public inputs. Panics if the
+/// trace doesn't satisfy the AIR for those inputs.
+fn prove_trace<H: Hasher>(
     h: &H,
     p: &Params,
-    public_inputs: &[u8],
+    pi: &air::PublicInputs,
+    rows: Vec<[F; NUM_COLS]>,
     seed: u64,
-    n_trace: usize,
-    check_final: bool,
 ) -> Vec<u8> {
     p.validate().expect("invalid params");
+    let shape: Shape = p.shape();
     let k = p.num_layers();
-    let w = p.num_cols as usize;
-    let n0 = 1usize << p.log_n0();
+    let n = p.n();
+    let log_n0 = p.log_n0();
+    let n0 = p.n0();
+    let hdeg = p.mask_degree as usize;
+    let chunks = p.num_quotient_chunks();
+    let m0 = 1usize << p.log_arities[0];
     let params_bytes = p.to_bytes();
+    let pi_bytes = pi.to_bytes();
+    let mut rng = Rng(seed | 1);
+    let g = F::two_adic_generator(p.log_n());
 
-    // ---- Trace: random low-degree columns, LDE, commit --------------
-    let mut rng = seed | 1;
-    let coeffs: Vec<Vec<F>> = (0..w)
-        .map(|_| (0..n_trace).map(|_| F::from_u64(next_rand(&mut rng))).collect())
-        .collect();
-    let omega0 = F::two_adic_generator(p.log_n0());
-    let lde: Vec<Vec<F>> = coeffs
-        .iter()
+    // ---- Trace: interpolate, mask with Z_H·R, LDE on the coset -------
+    let t_coeffs: Vec<Vec<F>> = (0..NUM_COLS)
         .map(|c| {
-            let mut v = c.clone();
-            v.resize(n0, F::ZERO);
-            ntt(&mut v, omega0);
+            let mut v: Vec<F> = rows.iter().map(|r| r[c]).collect();
+            intt(&mut v, g);
+            v.resize(n + hdeg, F::ZERO);
+            for i in 0..hdeg {
+                let r = rng.f();
+                v[i] = v[i] - r;
+                v[n + i] = v[n + i] + r;
+            }
             v
         })
         .collect();
-
-    let s0 = 1usize << p.log_leaves(0);
-    let m0 = 1usize << p.log_arities[0];
-    let trace_leaves: Vec<Vec<u8>> = (0..s0)
-        .map(|l| {
-            let mut b = Vec::with_capacity(m0 * w * 4);
-            for t in 0..m0 {
-                for col in &lde {
-                    b.extend_from_slice(&col[l + t * s0].value().to_le_bytes());
-                }
-            }
-            b
-        })
-        .collect();
-    let trace_tree = Tree::build(h, &trace_leaves);
+    let t_lde: Vec<Vec<F>> = t_coeffs.iter().map(|c| coset_lde(c, log_n0, SHIFT)).collect();
+    let t_leaves = salted_row_leaves(&t_lde, p.log_leaves(0), m0, &mut rng);
+    let t_tree = Tree::build(h, &t_leaves);
 
     let mut proof = Vec::new();
     let mut tr = Transcript::new(h, TRANSCRIPT_LABEL);
     tr.observe(&params_bytes);
-    tr.observe(public_inputs);
-
-    let cap0 = trace_tree.cap_bytes(p.cap_height_at(0));
-    proof.extend_from_slice(&cap0);
-    tr.observe(&cap0);
-    let z = tr.challenge_ext();
-
-    // ---- OOD evaluations, DEEP quotient -----------------------------
-    let ood: Vec<E> = coeffs
-        .iter()
-        .map(|c| c.iter().rev().fold(E::ZERO, |acc, &ci| acc * z + E::from_base(ci)))
-        .collect();
-    let ood_bytes: Vec<u8> = ood.iter().flat_map(|e| e.to_bytes()).collect();
-    proof.extend_from_slice(&ood_bytes);
-    tr.observe(&ood_bytes);
+    tr.observe(&pi_bytes);
+    let cap = t_tree.cap_bytes(p.cap_height_at(0));
+    proof.extend_from_slice(&cap);
+    tr.observe(&cap);
     let alpha = tr.challenge_ext();
 
-    let mut alpha_pows = Vec::with_capacity(w);
-    let mut acc = E::ONE;
-    for _ in 0..w {
-        alpha_pows.push(acc);
-        acc = acc * alpha;
+    // ---- Quotient on the LDE coset ----------------------------------
+    let mut alpha_pows = Vec::with_capacity(air::NUM_CONSTRAINTS);
+    let mut a = E::ONE;
+    for _ in 0..air::NUM_CONSTRAINTS {
+        alpha_pows.push(a);
+        a = a * alpha;
     }
-    let ood_combo = (0..w).fold(E::ZERO, |s, c| s + alpha_pows[c] * ood[c]);
-    let mut cur: Vec<E> = Vec::with_capacity(n0);
-    let mut x = F::ONE;
+    let per_coeffs = periodic_coeffs();
+    let omega0 = F::two_adic_generator(log_n0);
+    let step = n0 / n; // g = ω₀^step
+    let mut q_evals = Vec::with_capacity(n0);
+    let mut nums: Vec<F> = Vec::with_capacity(air::NUM_CONSTRAINTS);
+    let mut local = [F::ZERO; NUM_COLS];
+    let mut next = [F::ZERO; NUM_COLS];
+    let mut x = SHIFT;
     for i in 0..n0 {
-        let combo = (0..w).fold(E::ZERO, |s, c| s + alpha_pows[c].mul_base(lde[c][i]));
-        cur.push((combo - ood_combo) * (E::from_base(x) - z).inv());
+        for c in 0..NUM_COLS {
+            local[c] = t_lde[c][i];
+            next[c] = t_lde[c][(i + step) % n0];
+        }
+        let y = x.pow(shape.blocks() as u64);
+        let per: Vec<F> = per_coeffs.iter().map(|c| eval_base(c, y)).collect();
+        air::eval(&shape, &local, &next, &per, pi, &mut nums);
+        let div_invs = air::divisors(&shape, x, x.pow(n as u64), g).map(|d| d.inv());
+        q_evals.push(combine_constraints(&shape, &nums, &alpha_pows, &div_invs));
+        x = x * omega0;
+    }
+    let q_coeffs = coset_interpolate(&q_evals, SHIFT);
+    assert!(
+        q_coeffs[chunks * n..].iter().all(|c| *c == E::ZERO),
+        "AIR not satisfied by the trace (quotient is not a polynomial of the expected degree)"
+    );
+
+    // Split into chunks of n coefficients, add telescoping randomizers.
+    let mut q_chunks: Vec<Vec<E>> = (0..chunks)
+        .map(|j| {
+            let mut v = q_coeffs[j * n..(j + 1) * n].to_vec();
+            v.resize(n + hdeg, E::ZERO);
+            v
+        })
+        .collect();
+    for j in 0..chunks - 1 {
+        for i in 0..hdeg {
+            let b = rng.e();
+            q_chunks[j][n + i] = q_chunks[j][n + i] + b;
+            q_chunks[j + 1][i] = q_chunks[j + 1][i] - b;
+        }
+    }
+    // Base-field coefficient columns: 4 per chunk, then 4 for the mask.
+    let mut q_col_coeffs: Vec<Vec<F>> = Vec::with_capacity(p.quotient_cols());
+    for chunk in &q_chunks {
+        for comp in 0..4 {
+            q_col_coeffs.push(chunk.iter().map(|e| e.0[comp]).collect());
+        }
+    }
+    for _ in 0..4 {
+        q_col_coeffs.push((0..2 * n).map(|_| rng.f()).collect());
+    }
+    let q_lde: Vec<Vec<F>> = q_col_coeffs.iter().map(|c| coset_lde(c, log_n0, SHIFT)).collect();
+    let q_leaves = salted_row_leaves(&q_lde, p.log_leaves(0), m0, &mut rng);
+    let q_tree = Tree::build(h, &q_leaves);
+    let cap = q_tree.cap_bytes(p.cap_height_at(0));
+    proof.extend_from_slice(&cap);
+    tr.observe(&cap);
+    let z = tr.challenge_ext();
+
+    // ---- OOD values -------------------------------------------------
+    let gz = z.mul_base(g);
+    let chunk_cols = 4 * chunks;
+    let ood_z: Vec<E> = t_coeffs.iter().map(|c| eval_base(c, z)).collect();
+    let ood_gz: Vec<E> = t_coeffs.iter().map(|c| eval_base(c, gz)).collect();
+    let ood_q: Vec<E> = q_col_coeffs[..chunk_cols].iter().map(|c| eval_base(c, z)).collect();
+    let (lhs, rhs) = air_check_at_z(p, pi, z, alpha, &ood_z, &ood_gz, &ood_q);
+    assert_eq!(lhs, rhs, "prover bug: AIR identity fails at z");
+    let ood_bytes: Vec<u8> = ood_z.iter().chain(&ood_gz).chain(&ood_q).flat_map(|e| e.to_bytes()).collect();
+    proof.extend_from_slice(&ood_bytes);
+    tr.observe(&ood_bytes);
+    let gamma = tr.challenge_ext();
+
+    // ---- DEEP codeword ----------------------------------------------
+    let deep = deep_coeffs(gamma, &ood_z, &ood_gz, &ood_q);
+    let mut cur: Vec<E> = Vec::with_capacity(n0);
+    let mut trace_row = [F::ZERO; NUM_COLS];
+    let mut quot_row = vec![F::ZERO; chunk_cols];
+    let mut x = SHIFT;
+    for i in 0..n0 {
+        for c in 0..NUM_COLS {
+            trace_row[c] = t_lde[c][i];
+        }
+        for c in 0..chunk_cols {
+            quot_row[c] = q_lde[c][i];
+        }
+        let mask = [q_lde[chunk_cols][i], q_lde[chunk_cols + 1][i], q_lde[chunk_cols + 2][i], q_lde[chunk_cols + 3][i]];
+        cur.push(deep.eval(x, z, gz, &trace_row, &quot_row, mask));
         x = x * omega0;
     }
 
-    // ---- FRI folding + commitments ----------------------------------
+    // ---- FRI --------------------------------------------------------
     let mut fri_trees: Vec<Tree> = Vec::new();
     let mut fri_cws: Vec<Vec<E>> = Vec::new();
+    let mut shift = SHIFT;
     for j in 0..k {
         let beta = tr.challenge_ext();
-        cur = fold_layer(&cur, p.log_n(j), p.log_arities[j], beta);
+        cur = fold_layer(&cur, p.log_layer(j), p.log_arities[j], beta, shift);
+        shift = shift.pow(1 << p.log_arities[j]);
         if j + 1 < k {
             let leaves = 1usize << p.log_leaves(j + 1);
             let arity = 1usize << p.log_arities[j + 1];
-            let leaf_bytes: Vec<Vec<u8>> =
-                (0..leaves).map(|l| coset_leaf_bytes(&cur, l, leaves, arity)).collect();
+            let leaf_bytes: Vec<Vec<u8>> = (0..leaves).map(|l| coset_leaf_bytes(&cur, l, leaves, arity)).collect();
             let tree = Tree::build(h, &leaf_bytes);
             let cap = tree.cap_bytes(p.cap_height_at(j + 1));
             proof.extend_from_slice(&cap);
@@ -245,14 +303,13 @@ fn prove_inner<H: Hasher>(
             fri_cws.push(cur.clone());
         }
     }
-
-    let coeffs_final = intt_ext(&cur, F::two_adic_generator(p.log_n(k)));
+    let final_coeffs = coset_interpolate(&cur, shift);
     let final_len = p.final_poly_len();
     assert!(
-        !check_final || coeffs_final[final_len..].iter().all(|c| *c == E::ZERO),
+        final_coeffs[final_len..].iter().all(|c| *c == E::ZERO),
         "prover bug: final codeword is not low-degree"
     );
-    let final_bytes: Vec<u8> = coeffs_final[..final_len].iter().flat_map(|e| e.to_bytes()).collect();
+    let final_bytes: Vec<u8> = final_coeffs[..final_len].iter().flat_map(|e| e.to_bytes()).collect();
     proof.extend_from_slice(&final_bytes);
     tr.observe(&final_bytes);
 
@@ -265,8 +322,10 @@ fn prove_inner<H: Hasher>(
     // ---- Query openings ---------------------------------------------
     for _ in 0..p.num_queries {
         let mut pos = tr.challenge_index(p.log_leaves(0));
-        proof.extend_from_slice(&trace_leaves[pos]);
-        proof.extend_from_slice(&trace_tree.path(pos, p.cap_height_at(0)));
+        proof.extend_from_slice(&t_leaves[pos]);
+        proof.extend_from_slice(&t_tree.path(pos, p.cap_height_at(0)));
+        proof.extend_from_slice(&q_leaves[pos]);
+        proof.extend_from_slice(&q_tree.path(pos, p.cap_height_at(0)));
         for j in 1..k {
             let leaves = 1usize << p.log_leaves(j);
             let idx = pos % leaves;
@@ -279,18 +338,30 @@ fn prove_inner<H: Hasher>(
     proof
 }
 
+/// Random witness for benches and tests: random key, path, salt.
+pub fn random_witness(depth: usize, seed: u64) -> Witness {
+    let mut rng = Rng(seed | 1);
+    let mut digest = || -> [F; 8] { core::array::from_fn(|_| F::from_u64(rng.next())) };
+    let sk = digest();
+    let salt = digest();
+    let path = (0..depth).map(|_| digest()).collect();
+    let index = (seed as usize) & ((1 << depth) - 1);
+    Witness { sk, path, index, salt, epoch: 0x0000_1234_5678_9abc }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::air::PublicInputs;
     use crate::hash::Sha2Hasher;
     use crate::verifier::{verify, VerifyError};
 
     fn small() -> Params {
         Params {
-            log_trace_rows: 6,
-            num_cols: 5,
-            log_blowup: 2,
-            num_queries: 6,
+            depth: 3,
+            mask_degree: 26,
+            log_blowup: 3,
+            num_queries: 12,
             grind_bits: 4,
             cap_height: 2,
             log_arities: vec![1, 2, 2],
@@ -298,65 +369,134 @@ mod tests {
     }
 
     #[test]
-    fn ntt_round_trips() {
-        let omega = F::two_adic_generator(4);
-        let orig: Vec<F> = (0..16u64).map(|i| F::from_u64(i * 7 + 1)).collect();
-        let mut v = orig.clone();
-        ntt(&mut v, omega);
-        let back = intt_ext(&v.iter().map(|&f| E::from_base(f)).collect::<Vec<_>>(), omega);
-        assert_eq!(back.iter().map(|e| e.0[0]).collect::<Vec<_>>(), orig);
-    }
-
-    #[test]
-    fn prove_then_verify_accepts() {
-        for arities in [vec![1], vec![1, 1, 1], vec![2, 3], vec![1, 2, 2]] {
-            let p = Params { log_arities: arities, ..small() };
-            let proof = prove(&Sha2Hasher, &p, b"pi", 7);
-            assert_eq!(verify(&Sha2Hasher, &p.to_bytes(), &proof, b"pi"), Ok(()), "{:?}", p.log_arities);
+    fn constants_match_derivation() {
+        use sha2::{Digest as _, Sha256};
+        let derive = |i: u32| {
+            let mut h = Sha256::new();
+            h.update(b"onym-poseidon2-babybear-w16-v0");
+            h.update(i.to_le_bytes());
+            let d = h.finalize();
+            (u64::from_le_bytes(d[..8].try_into().unwrap()) % crate::field::P as u64) as u32
+        };
+        for r in 0..8 {
+            for l in 0..16 {
+                assert_eq!(crate::poseidon2_constants::RC_EXT[r][l], derive((16 * r + l) as u32));
+            }
+        }
+        for r in 0..13 {
+            assert_eq!(crate::poseidon2_constants::RC_INT[r], derive(128 + r as u32));
         }
     }
 
     #[test]
-    fn rejects_wrong_public_inputs() {
+    fn trace_satisfies_air_on_trace_domain() {
         let p = small();
-        let proof = prove(&Sha2Hasher, &p, b"pi", 7);
-        assert!(verify(&Sha2Hasher, &p.to_bytes(), &proof, b"other").is_err());
+        let shape = p.shape();
+        let w = random_witness(shape.depth, 11);
+        let pi = w.public_inputs();
+        let rows = w.trace(&shape);
+        let g = F::two_adic_generator(shape.log_n());
+        let mut nums = Vec::new();
+        for r in 0..shape.n() {
+            let per = air::periodic_row(r % air::BLOCK);
+            air::eval(&shape, &rows[r], &rows[(r + 1) % shape.n()], &per, &pi, &mut nums);
+            let x = g.pow(r as u64);
+            let divs = air::divisors(&shape, x, x.pow(shape.n() as u64), g);
+            for (gi, &(s, e)) in air::GROUPS.iter().enumerate() {
+                if divs[gi] == F::ZERO {
+                    for i in s..e {
+                        assert_eq!(nums[i], F::ZERO, "row {r} group {gi} constraint {i}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn periodic_coeffs_reproduce_rows() {
+        let coeffs = periodic_coeffs();
+        let w32 = F::two_adic_generator(air::LOG_BLOCK);
+        for r in 0..air::BLOCK {
+            let row = air::periodic_row(r);
+            for c in 0..air::NUM_PERIODIC {
+                assert_eq!(eval_base::<F>(&coeffs[c], w32.pow(r as u64)), row[c]);
+            }
+        }
+    }
+
+    #[test]
+    fn prove_then_verify_accepts() {
+        for arities in [vec![1, 2, 2], vec![2, 3], vec![1, 1, 1, 1]] {
+            // Hiding needs mask degree ≥ queries · 2^a₀ + 2.
+            let h = 12 * (1u16 << arities[0]) + 2;
+            let p = Params { mask_degree: h, log_arities: arities, ..small() };
+            let w = random_witness(p.depth as usize, 5);
+            let proof = prove(&Sha2Hasher, &p, &w, 99);
+            let pi = w.public_inputs().to_bytes();
+            assert_eq!(verify(&Sha2Hasher, &p.to_bytes(), &proof, &pi), Ok(()), "{:?}", p.log_arities);
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_epoch_and_commitment() {
+        let p = small();
+        let w = random_witness(p.depth as usize, 5);
+        let proof = prove(&Sha2Hasher, &p, &w, 99);
+        let pi = w.public_inputs();
+        let wrong_epoch = PublicInputs { commitment: pi.commitment, epoch: pi.epoch + 1 };
+        assert!(verify(&Sha2Hasher, &p.to_bytes(), &proof, &wrong_epoch.to_bytes()).is_err());
+        let mut c = pi.commitment;
+        c[3] = c[3] + F::ONE;
+        let wrong_commit = PublicInputs { commitment: c, epoch: pi.epoch };
+        assert!(verify(&Sha2Hasher, &p.to_bytes(), &proof, &wrong_commit.to_bytes()).is_err());
     }
 
     #[test]
     fn rejects_any_single_byte_flip() {
         let p = small();
-        let proof = prove(&Sha2Hasher, &p, b"pi", 7);
+        let w = random_witness(p.depth as usize, 5);
+        let proof = prove(&Sha2Hasher, &p, &w, 99);
         let pb = p.to_bytes();
-        // Stride keeps the test fast while touching every section.
-        for i in (0..proof.len()).step_by(37) {
+        let pi = w.public_inputs().to_bytes();
+        for i in (0..proof.len()).step_by(41) {
             let mut bad = proof.clone();
             bad[i] ^= 0x01;
-            assert!(verify(&Sha2Hasher, &pb, &bad, b"pi").is_err(), "byte {i} flip accepted");
+            assert!(verify(&Sha2Hasher, &pb, &bad, &pi).is_err(), "byte {i} flip accepted");
         }
     }
 
     #[test]
     fn rejects_truncated_and_extended() {
         let p = small();
-        let proof = prove(&Sha2Hasher, &p, b"pi", 7);
+        let w = random_witness(p.depth as usize, 5);
+        let proof = prove(&Sha2Hasher, &p, &w, 99);
         let pb = p.to_bytes();
-        assert_eq!(verify(&Sha2Hasher, &pb, &proof[..proof.len() - 1], b"pi"), Err(VerifyError::BadProof));
+        let pi = w.public_inputs().to_bytes();
+        assert_eq!(verify(&Sha2Hasher, &pb, &proof[..proof.len() - 1], &pi), Err(VerifyError::BadProof));
         let mut longer = proof.clone();
         longer.push(0);
-        assert_eq!(verify(&Sha2Hasher, &pb, &longer, b"pi"), Err(VerifyError::BadProof));
+        assert_eq!(verify(&Sha2Hasher, &pb, &longer, &pi), Err(VerifyError::BadProof));
     }
 
     #[test]
-    fn rejects_high_degree_trace() {
-        // Same params, but the committed columns have degree 2× the
-        // bound. FRI must catch it at some fold or at the final poly.
+    #[should_panic(expected = "AIR not satisfied")]
+    fn prover_refuses_non_member() {
+        // Someone holding a different key tries to prove against the
+        // real group commitment: the commitment boundary can't hold.
         let p = small();
-        let proof = prove_inner(&Sha2Hasher, &p, b"pi", 7, 2 << p.log_trace_rows, false);
-        let err = verify(&Sha2Hasher, &p.to_bytes(), &proof, b"pi").unwrap_err();
-        assert!(
-            matches!(err, VerifyError::FoldMismatch { .. } | VerifyError::FinalPolyMismatch),
-            "{err:?}"
-        );
+        let mut w = random_witness(p.depth as usize, 5);
+        let real = w.public_inputs();
+        w.sk[0] = w.sk[0] + F::ONE;
+        prove_trace(&Sha2Hasher, &p, &real, w.trace(&p.shape()), 1);
+    }
+
+    #[test]
+    fn rejects_proof_for_different_params() {
+        let p = small();
+        let w = random_witness(p.depth as usize, 5);
+        let proof = prove(&Sha2Hasher, &p, &w, 99);
+        let other = Params { num_queries: 13, mask_degree: 28, ..small() };
+        let pi = w.public_inputs().to_bytes();
+        assert!(verify(&Sha2Hasher, &other.to_bytes(), &proof, &pi).is_err());
     }
 }
