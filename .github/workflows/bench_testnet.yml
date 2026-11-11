@@ -1,0 +1,143 @@
+name: Bench gas (testnet)
+
+# Manual-dispatch testnet gas bench for any subset of the PLONK
+# contracts, without cutting a release. Same driver as release.yml's
+# bench-gas job (scripts/bench-gas/run.sh): deploys fresh contracts to
+# Stellar testnet, submits real transactions, and captures per-op fees,
+# CPU instructions and memory. Differences from release.yml:
+#   * no tag / release required; benches any ref,
+#   * contracts are an input (default: sep-tyranny),
+#   * results go to the job summary + an artifact, never to a release
+#     body or the contracts manifest.
+#
+#   gh workflow run bench_testnet.yml -f contracts=sep-tyranny
+#
+# Third-party `uses:` are pinned to commit SHA (version tag in a
+# trailing comment), same posture as release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      contracts:
+        description: 'Space-separated contracts to bench (sep-anarchy sep-democracy sep-oligarchy sep-oneonone sep-tyranny)'
+        required: false
+        default: 'sep-tyranny'
+        type: string
+      ref:
+        description: 'Git ref to bench (branch / tag / SHA). Defaults to the dispatch ref.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bench-gas-testnet:
+    name: bench-gas (testnet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Same override as release.yml: stellar-cli v26's contract-build
+      # wrapper rejects the contracts' pinned 1.91.0. The prover's
+      # generators are built via --manifest-path from the repo root, so
+      # they use stable too.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Validate contract list
+        env:
+          CONTRACTS: ${{ inputs.contracts }}
+        run: |
+          set -euo pipefail
+          for c in $CONTRACTS; do
+            case "$c" in
+              sep-anarchy|sep-democracy|sep-oligarchy|sep-oneonone|sep-tyranny) ;;
+              *) echo "::error::unknown contract '$c'"; exit 1 ;;
+            esac
+          done
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Rust build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            plonk/prover/target
+            plonk/*/target
+          key: bench-testnet-rust-${{ hashFiles('plonk/**/Cargo.toml', 'plonk/**/Cargo.lock') }}
+
+      - name: Install stellar CLI
+        env:
+          # Same pin as release.yml; bump in lockstep.
+          STELLAR_VERSION: '26.0.0'
+          STELLAR_SHA256: '31c83db342d1184b31f6591e739950eb45756be46dcd7bb57e4f38e91ea32e84'
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tarball="$tmp/stellar-cli.tar.gz"
+          curl -sSLf -o "$tarball" \
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_VERSION}/stellar-cli-${STELLAR_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${STELLAR_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xz -C "$tmp" -f "$tarball"
+          binary="$(find "$tmp" -maxdepth 3 -type f -name stellar -perm -u+x | head -1)"
+          test -n "$binary" || { echo "no stellar binary in tarball" >&2; exit 1; }
+          sudo install -m 0755 "$binary" /usr/local/bin/stellar
+          rm -rf "$tmp"
+          stellar --version
+
+      - name: Configure stellar testnet
+        run: |
+          stellar network add testnet \
+            --rpc-url https://soroban-testnet.stellar.org \
+            --network-passphrase "Test SDF Network ; September 2015" || true
+
+      - name: Run gas benchmarks
+        env:
+          BENCH_NETWORK: testnet
+          BENCH_TAG: ${{ inputs.ref || github.ref_name }}
+          CONTRACTS: ${{ inputs.contracts }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/bench-gas/run.sh \
+                   scripts/bench-gas/setup.sh \
+                   scripts/bench-gas/contracts/*.sh
+          # shellcheck disable=SC2086  # word-split the contract list
+          bash scripts/bench-gas/run.sh $CONTRACTS
+
+      - name: Fail if any op produced no fee data
+        # run.sh keeps going when a driver errors, so check the rows: an
+        # op row without fee data means the tx was rejected.
+        run: |
+          set -euo pipefail
+          missing="$(jq -r 'select(.row_type == "op" and (.fee_stroops == null)) | "\(.contract) \(.op) tier=\(.tier)"' \
+            scripts/bench-gas/results.jsonl)"
+          if [ -n "$missing" ]; then
+            echo "::error::ops without fee data (rejected or not submitted):"
+            echo "$missing"
+            exit 1
+          fi
+
+      - name: Publish results to job summary
+        if: always()
+        run: |
+          if [ -f scripts/bench-gas/results.md ]; then
+            cat scripts/bench-gas/results.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload bench artefacts (JSONL + rendered body)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: gas-benchmarks-testnet-${{ github.run_id }}
+          path: |
+            scripts/bench-gas/results.md
+            scripts/bench-gas/results.jsonl
+          if-no-files-found: warn

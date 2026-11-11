@@ -57,7 +57,7 @@ stellar keys fund "$BENCH_DEPLOYER" \
 
 echo "==> building contracts"
 mkdir -p "$BENCH_ARTIFACT_DIR"
-for c in sep-anarchy sep-democracy sep-oligarchy sep-oneonone sep-tyranny; do
+for c in ${BENCH_BUILD_CONTRACTS:-sep-anarchy sep-democracy sep-oligarchy sep-oneonone sep-tyranny}; do
     echo "    $c"
     stellar contract build \
         --manifest-path "$REPO_ROOT/plonk/$c/Cargo.toml" \
@@ -79,7 +79,8 @@ cargo build \
     --manifest-path "$REPO_ROOT/plonk/prover/Cargo.toml" \
     --release \
     --bin gen-membership-proof \
-    --bin gen-update-proof >/dev/null
+    --bin gen-update-proof \
+    --bin gen-tyranny-proofs >/dev/null
 export BENCH_PROVER_BIN_DIR="$REPO_ROOT/plonk/prover/target/release"
 
 echo "==> setup complete"

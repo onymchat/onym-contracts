@@ -122,6 +122,16 @@ bench_gen_update_proof() {
 }
 
 # Helpers to read out-dir artifacts back as shell-safe strings.
+# bench_gen_tyranny_proofs <depth> <group_id_hex> <out_dir>
+# Chained sep-tyranny create (epoch 0) + update (epoch 0 → 1) bundle for
+# one group; see plonk/prover/src/bin/gen_tyranny_proofs.rs for layout.
+bench_gen_tyranny_proofs() {
+    "${BENCH_PROVER_BIN_DIR}/gen-tyranny-proofs" \
+        --depth "$1" \
+        --group-id "$2" \
+        --out-dir "$3" >&2
+}
+
 bench_gen_proof_hex() { cat "$1/proof.hex"; }
 bench_gen_pi_json()   { cat "$1/public_inputs.json"; }
 bench_gen_commitment_hex() { cat "$1/commitment.hex"; }

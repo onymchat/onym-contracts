@@ -12,9 +12,6 @@ export BENCH_JSONL
 
 : > "$BENCH_JSONL"
 
-# shellcheck source=setup.sh
-. "$SCRIPT_DIR/setup.sh"
-
 if [ "$#" -gt 0 ]; then
     CONTRACTS=("$@")
 else
@@ -22,6 +19,11 @@ else
     # sees the meaty rows early and can ^C if RPC starts wobbling.
     CONTRACTS=(sep-oneonone sep-oligarchy sep-anarchy sep-democracy sep-tyranny)
 fi
+# setup.sh builds only these WASMs.
+export BENCH_BUILD_CONTRACTS="${CONTRACTS[*]}"
+
+# shellcheck source=setup.sh
+. "$SCRIPT_DIR/setup.sh"
 
 for c in "${CONTRACTS[@]}"; do
     driver="$SCRIPT_DIR/contracts/$c.sh"

@@ -29,6 +29,18 @@ it). This workflow doesn't push commits, doesn't bump versions, and
 doesn't touch the published release notes — it only uploads two
 files as release assets.
 
+### Without a release
+
+`.github/workflows/bench_testnet.yml` runs the same driver against
+testnet for any subset of contracts on any ref, and publishes the table
+to the job summary plus a `gas-benchmarks-testnet-<run_id>` artifact.
+It never touches a release body or the contracts manifest:
+
+```
+gh workflow run bench_testnet.yml -f contracts=sep-tyranny
+gh workflow run bench_testnet.yml -f contracts="sep-anarchy sep-tyranny" -f ref=my-branch
+```
+
 ## Local dry-run
 
 ```
@@ -48,7 +60,7 @@ Outputs land under `scripts/bench-gas/results.{txt,jsonl}`.
 | sep-oligarchy  | ✓      | ✓        | ✓ (revert-mode)   | (V3)              | ✓         |
 | sep-anarchy    | ✓      | ✓ × 3    | ✓ × 3             | ✓ × 3             | ✓         |
 | sep-democracy  | ✓      | ✓ × 2    | ✓ × 2             | (V3)              | ✓         |
-| sep-tyranny    | ✓      | (V3)     | (V3)              | (V3)              | ✓         |
+| sep-tyranny    | ✓      | ✓ × 3    | ✓ × 3             | ✓ × 3             | ✓         |
 
 `× 3` = covered at all three tiers (d=5, d=8, d=11). `× 2` = d=5/d=8
 only; sep-democracy's tier 2 (d=11) create + update are gated off by
@@ -72,6 +84,12 @@ update circuit replaces the simplified fallback.
   proof binds — the contract's PI-handshake gates pass without
   runtime proof generation. PR #11 (issue #5) ships the lifecycle
   test pinning this round-trip.
+* **`sep-tyranny`** generates a chained create → update bundle per
+  tier at runtime via `gen-tyranny-proofs` (canonical roster, distinct
+  `group_id` per tier, `epoch_old = 0`), plus a membership proof for the
+  post-create state via `gen-membership-proof`. The committed tyranny
+  fixtures can't be used: the update fixture is baked at
+  `epoch_old = 1234`, and all of them pin `group_id_fr = 0x7777`.
 * **`sep-anarchy`** generates fresh PLONK proofs at runtime via
   `gen-membership-proof` + `gen-update-proof` (vendored at
   `plonk/prover/src/bin/`, built by `setup.sh`). The committed
