@@ -158,8 +158,10 @@ jobs:
       matrix:
         include:
           - field: BabyBear⁴
+            slug: ext4
             features: prover
           - field: BabyBear⁸ (ext8)
+            slug: ext8
             features: prover,ext8
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -175,7 +177,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             pq/sha-fri/target
-          key: pr-pq-sha-fri-${{ matrix.features }}-${{ hashFiles('pq/sha-fri/Cargo.toml', 'pq/sha-fri/Cargo.lock') }}
+          # Cache keys can't contain commas, hence `slug` not `features`.
+          key: pr-pq-sha-fri-${{ matrix.slug }}-${{ hashFiles('pq/sha-fri/Cargo.toml', 'pq/sha-fri/Cargo.lock') }}
 
       - name: cargo test --release
         working-directory: pq/sha-fri
@@ -184,7 +187,7 @@ jobs:
 
       - name: no_std verifier build (what contracts link)
         working-directory: pq/sha-fri
-        run: cargo build --release --lib ${{ matrix.features == 'prover,ext8' && '--features ext8' || '' }}
+        run: cargo build --release --lib ${{ matrix.slug == 'ext8' && '--features ext8' || '' }}
 
   pq-contracts:
     name: pq / ${{ matrix.contract }}${{ matrix.features && format(' ({0})', matrix.features) || '' }}
@@ -218,6 +221,13 @@ jobs:
       - name: cargo test --release --lib
         working-directory: pq/${{ matrix.contract }}
         run: cargo test --release --lib ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+
+      - name: test_snapshots unchanged
+        # Contract tests prove with fixed seeds, so their snapshots are
+        # deterministic. A diff means a test started using OS randomness
+        # or the proof format changed without re-committing snapshots.
+        if: matrix.features == ''
+        run: git diff --exit-code -- pq/${{ matrix.contract }}/test_snapshots
 
       - name: cargo build --release (wasm32v1-none)
         working-directory: pq/${{ matrix.contract }}

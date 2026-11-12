@@ -1,4 +1,4 @@
-//! End-to-end contract tests with real Pq100 STARK proofs (tier 0, d=5).
+//! End-to-end contract tests (seeded, so `test_snapshots/` stay stable) with real Pq100 STARK proofs (tier 0, d=5).
 
 extern crate std;
 
@@ -29,16 +29,16 @@ fn bundle(seed: u64, group: u64) -> Bundle {
     let g = gid(group);
     let admin = prover::with_admin(prover::random_witness(5, seed, 0), g);
     let pc = deployment_params(Kind::AdminCreate, 5, PROFILE);
-    let create_proof = prover::prove(&Sha2Hasher, &pc, &admin);
+    let create_proof = prover::prove_seeded(&Sha2Hasher, &pc, &admin, prover::seed_from_u64(seed * 10 + 1));
     let pi = admin.public_inputs();
 
     let member = prover::random_witness(5, seed, 0);
     let pm = deployment_params(Kind::Membership, 5, PROFILE);
-    let member_proof = prover::prove(&Sha2Hasher, &pm, &member);
+    let member_proof = prover::prove_seeded(&Sha2Hasher, &pm, &member, prover::seed_from_u64(seed * 10 + 2));
 
     let upd = prover::with_admin(prover::with_random_update(prover::random_witness(5, seed, 0), seed), g);
     let pu = deployment_params(Kind::AdminUpdate, 5, PROFILE);
-    let update_proof = prover::prove(&Sha2Hasher, &pu, &upd);
+    let update_proof = prover::prove_seeded(&Sha2Hasher, &pu, &upd, prover::seed_from_u64(seed * 10 + 3));
     let upi = upd.public_inputs();
 
     Bundle {
