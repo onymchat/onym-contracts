@@ -30,7 +30,6 @@ target
 # vs the prover's 1.88 pin).
 pq/verifier/Cargo.lock
 pq/prover/Cargo.lock
-pq/sha-fri/Cargo.lock
 
 # Stray `out/` directories from manual `stellar contract build
 # --out-dir out` runs. The bench scripts route their build output
