@@ -16,6 +16,24 @@ name: PR Build
 #                       per-tier VK SHA-256 anchor change — fails the
 #                       build immediately.
 #
+# Three PQ jobs (pq/):
+#   - pq-sha-fri:    the STARK crate's tests at both challenge-field
+#                    degrees (default BabyBear⁴ and `ext8`), including
+#                    the bit-for-bit check against Plonky3's Poseidon2
+#                    and the bundle-generator binaries.
+#   - pq-contracts:  per-contract (and per-profile) tests with real
+#                    proofs + wasm32 build.
+#   - pq-metered:    builds the bench contract WASM and runs
+#                    pq/sha-fri-runner, which verifies real proofs
+#                    under the soroban-sdk metered host (catches
+#                    regressions native tests can't see, e.g. a WASM-only
+#                    behaviour difference or a CPU/memory blow-up).
+#
+# The PQ crates pin rustc 1.95.0 (with the wasm32v1-none target) in
+# their rust-toolchain.toml; rustup honours it, so these jobs don't set
+# RUSTUP_TOOLCHAIN. Their lockfiles are tracked so fresh resolutions
+# can't drift (see #48).
+#
 # Third-party `uses:` are pinned to commit SHA (with the version tag
 # in a trailing comment for human + Dependabot readability) so a
 # tag-rewrite on those repos can't inject code into our CI runs.
@@ -130,3 +148,122 @@ jobs:
         # the committed fixtures in plonk/verifier/tests/fixtures/.
         # Drift = build failure. README.md documents this contract.
         run: cargo test --release --lib plonk_verifier_fixtures_match_or_regenerate
+
+  pq-sha-fri:
+    name: pq / sha-fri (${{ matrix.field }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - field: BabyBear⁴
+            slug: ext4
+            features: prover
+          - field: BabyBear⁸ (ext8)
+            slug: ext8
+            features: prover,ext8
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        # rustup then honours pq/sha-fri/rust-toolchain.toml (1.95.0).
+
+      - name: Cache Rust build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            pq/sha-fri/target
+          # Cache keys can't contain commas, hence `slug` not `features`.
+          key: pr-pq-sha-fri-${{ matrix.slug }}-${{ hashFiles('pq/sha-fri/Cargo.toml', 'pq/sha-fri/Cargo.lock') }}
+
+      - name: cargo test --release
+        working-directory: pq/sha-fri
+        # --release: the tests prove real STARKs, which is slow unoptimised.
+        run: cargo test --release --features ${{ matrix.features }}
+
+      - name: no_std verifier build (what contracts link)
+        working-directory: pq/sha-fri
+        run: cargo build --release --lib ${{ matrix.slug == 'ext8' && '--features ext8' || '' }}
+
+  pq-contracts:
+    name: pq / ${{ matrix.contract }}${{ matrix.features && format(' ({0})', matrix.features) || '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - contract: sep-anarchy
+            features: ''
+          - contract: sep-anarchy
+            features: conjectured
+          - contract: sep-tyranny
+            features: ''
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+
+      - name: Cache Rust build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            pq/${{ matrix.contract }}/target
+          key: pr-pq-${{ matrix.contract }}-${{ matrix.features }}-${{ hashFiles(format('pq/{0}/Cargo.toml', matrix.contract), format('pq/{0}/Cargo.lock', matrix.contract), 'pq/sha-fri/Cargo.toml') }}
+
+      - name: cargo test --release --lib
+        working-directory: pq/${{ matrix.contract }}
+        run: cargo test --release --lib ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+
+      - name: test_snapshots unchanged
+        # Contract tests prove with fixed seeds, so their snapshots are
+        # deterministic. A diff means a test started using OS randomness
+        # or the proof format changed without re-committing snapshots.
+        if: matrix.features == ''
+        run: git diff --exit-code -- pq/${{ matrix.contract }}/test_snapshots
+
+      - name: cargo build --release (wasm32v1-none)
+        working-directory: pq/${{ matrix.contract }}
+        run: cargo build --release --target wasm32v1-none ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+
+  pq-metered:
+    name: pq / metered bench (soroban host)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+
+      - name: Cache Rust build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            pq/sha-fri-bench/target
+            pq/sha-fri-runner/target
+          key: pr-pq-metered-${{ hashFiles('pq/sha-fri/Cargo.toml', 'pq/sha-fri-bench/Cargo.lock', 'pq/sha-fri-runner/Cargo.lock') }}
+
+      - name: Build bench contract WASM
+        working-directory: pq/sha-fri-bench
+        run: cargo build --release --target wasm32v1-none
+
+      - name: Verify real proofs under the metered host
+        working-directory: pq/sha-fri-runner
+        # The runner panics if any honest proof is rejected on-chain or a
+        # tampered proof / wrong epoch is accepted.
+        run: |
+          set -euo pipefail
+          cargo run --release -- \
+            ../sha-fri-bench/target/wasm32v1-none/release/pq_sha_fri_bench_contract.wasm \
+            | tee metered.md
+          cat metered.md >> "$GITHUB_STEP_SUMMARY"
