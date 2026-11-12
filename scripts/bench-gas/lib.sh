@@ -604,14 +604,23 @@ bench_invoke() {
     local err
     err="$(mktemp)"
 
-    stellar contract invoke \
-        --config-dir "$BENCH_CONFIG_DIR" \
-        --network "$BENCH_NETWORK" \
-        --id "$cid" \
-        --source-account "$BENCH_DEPLOYER" \
-        --send yes \
-        -- "$fn" "$@" \
-        > /dev/null 2> "$err" || true
+    # Retry only when the RPC rejects the *simulation* for load ("preflight
+    # queue full"): nothing was signed or sent, so a retry can't
+    # double-submit. Any other failure is recorded as-is.
+    local attempt
+    for attempt in 1 2 3 4; do
+        stellar contract invoke \
+            --config-dir "$BENCH_CONFIG_DIR" \
+            --network "$BENCH_NETWORK" \
+            --id "$cid" \
+            --source-account "$BENCH_DEPLOYER" \
+            --send yes \
+            -- "$fn" "$@" \
+            > /dev/null 2> "$err" || true
+        grep -q "preflight queue full" "$err" || break
+        echo "    RPC preflight queue full (attempt $attempt); retrying in $(( attempt * 10 ))s" >&2
+        sleep $(( attempt * 10 ))
+    done
 
     cat "$err" >&2
 
