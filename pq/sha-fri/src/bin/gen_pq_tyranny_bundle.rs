@@ -44,9 +44,10 @@ fn write(dir: &Path, proof: &[u8], pis: &[[u8; 32]]) -> std::io::Result<()> {
     std::fs::write(dir.join("public_inputs.json"), format!("[{}]\n", items.join(",")))
 }
 
-fn prove(kind: Kind, depth: u8, w: &sha_fri::air::Witness, seed: u64) -> Vec<u8> {
+fn prove(kind: Kind, depth: u8, w: &sha_fri::air::Witness) -> Vec<u8> {
     let p = deployment_params(kind, depth, Profile::Pq100);
-    let proof = prover::prove(&Sha2Hasher, &p, w, seed);
+    // OS-entropy masking randomness, exactly as a real client proves.
+    let proof = prover::prove(&Sha2Hasher, &p, w);
     verifier::verify(&Sha2Hasher, &p.to_bytes(), &proof, &w.public_inputs().to_bytes())
         .unwrap_or_else(|e| panic!("{kind:?} self-verify: {e:?}"));
     proof
@@ -77,10 +78,10 @@ fn main() -> ExitCode {
 
     let admin = prover::with_admin(base(), gid);
     let pi = admin.public_inputs();
-    let create = prove(Kind::AdminCreate, depth, &admin, seed ^ 0xC0FFEE);
-    let member = prove(Kind::Membership, depth, &base(), seed ^ 0xFACE);
+    let create = prove(Kind::AdminCreate, depth, &admin);
+    let member = prove(Kind::Membership, depth, &base());
     let upd = prover::with_admin(prover::with_random_update(base(), seed), gid);
-    let update = prove(Kind::AdminUpdate, depth, &upd, seed ^ 0xBEEF);
+    let update = prove(Kind::AdminUpdate, depth, &upd);
 
     let c = digest_to_bytes(&pi.commitment);
     let a = digest_to_bytes(&pi.admin.unwrap().0);

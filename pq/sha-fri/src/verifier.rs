@@ -27,7 +27,7 @@
 //!    `f(x) = (Σ γ·T(x) + Σ γ·Q(x) − A_z)/(x − z) + (Σ γ·T(x) − A_gz)/(x − gz) + r(x)`,
 //!    where `r` is the committed random mask polynomial that keeps FRI
 //!    layers hiding.
-//! 3. **FRI** on `f` with degree bound `2n`, as in the v0 prototype, on
+//! 3. **FRI** on `f` with degree bound `2n` (multi-arity folding), on
 //!    the coset `SHIFT·⟨ω⟩`.
 
 use crate::air::{self, PublicInputs, Shape, NUM_PERIODIC};

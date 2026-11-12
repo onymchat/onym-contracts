@@ -37,13 +37,13 @@
                   "bytes": "1000000011000000120000001300000014000000150000001600000017000000"
                 },
                 {
-                  "bytes": "a52f722270b9fa4b9bf1252c3b349f172f19b36b370bec52f6fd11050525602a"
+                  "bytes": "45576a7357d01b08bb90fa7090ef533a4c7b8d6600553950f45ae44bd044cd4b"
                 },
                 {
                   "u32": 0
                 },
                 {
-                  "bytes": "d952ed265a5c79284cd757497307b9228ec25f1387de1c0155533025c4c08e0f"
+                  "bytes": "406d024e1e462533d1f0554420fe7e09f693fe1491a8e731636f9f39cffc3a2d"
                 }
               ]
             }
@@ -124,7 +124,7 @@
               },
               "durability": "persistent",
               "val": {
-                "bytes": "d952ed265a5c79284cd757497307b9228ec25f1387de1c0155533025c4c08e0f"
+                "bytes": "406d024e1e462533d1f0554420fe7e09f693fe1491a8e731636f9f39cffc3a2d"
               }
             }
           },
@@ -157,7 +157,7 @@
                       "symbol": "commitment"
                     },
                     "val": {
-                      "bytes": "a52f722270b9fa4b9bf1252c3b349f172f19b36b370bec52f6fd11050525602a"
+                      "bytes": "45576a7357d01b08bb90fa7090ef533a4c7b8d6600553950f45ae44bd044cd4b"
                     }
                   },
                   {
@@ -232,7 +232,7 @@
                     "symbol": "UsedProof"
                   },
                   {
-                    "bytes": "093ea75b2fc7f66d14f735e7ab083e109002ebbfbbdf724fa47538331e733c17"
+                    "bytes": "035baf0fb2d5ed6817ce41f34ba919c90f96bec5a0aeba5986a7ad1487bdb94e"
                   }
                 ]
               },

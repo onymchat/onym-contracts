@@ -5,10 +5,14 @@
 //! exact same round functions symbolically at the OOD point that the
 //! witness generator runs natively.
 //!
-//! - External linear layer: `circ(2·M4, M4, M4, M4)` with the
-//!   Poseidon2-paper `M4 = [[5,7,1,3],[4,6,1,1],[1,3,5,7],[1,1,4,6]]`.
+//! This is Plonky3's canonical BabyBear width-16 instance
+//! (`p3_baby_bear::default_babybear_poseidon2_16`), checked bit for bit
+//! by `tests::matches_plonky3`:
+//!
+//! - External linear layer: `circ(2·M4, M4, M4, M4)` with Plonky3's
+//!   `MDSMat4 = [[2,3,1,1],[1,2,3,1],[1,1,2,3],[3,1,1,2]]`.
 //! - Internal linear layer: `y_i = μ_i·x_i + Σ_j x_j`.
-//! - Constants: see [`crate::poseidon2_constants`] (**prototype only**).
+//! - Round constants and `μ`: [`crate::poseidon2_constants`].
 //!
 //! Hashing conventions used by the membership AIR:
 //! - `compress(l, r)` = first 8 lanes of `permute([l ‖ r])`.
@@ -30,20 +34,20 @@ pub fn sbox<A: Algebra>(x: A) -> A {
     x6 * x
 }
 
-/// Addition chain for the Poseidon2-paper M4 (no multiplications).
+/// Plonky3's `MDSMat4` addition chain (7 additions, 2 doublings).
 #[inline]
 fn m4<A: Algebra>(x: [A; 4]) -> [A; 4] {
-    let t0 = x[0] + x[1];
-    let t1 = x[2] + x[3];
-    let t2 = x[1] + x[1] + t1;
-    let t3 = x[3] + x[3] + t0;
-    let t1_4 = t1 + t1 + t1 + t1;
-    let t0_4 = t0 + t0 + t0 + t0;
-    let t4 = t1_4 + t3;
-    let t5 = t0_4 + t2;
-    let t6 = t3 + t5;
-    let t7 = t2 + t4;
-    [t6, t5, t7, t4]
+    let t01 = x[0] + x[1];
+    let t23 = x[2] + x[3];
+    let t0123 = t01 + t23;
+    let t01123 = t0123 + x[1];
+    let t01233 = t0123 + x[3];
+    [
+        t01123 + t01,         // 2·x0 + 3·x1 +   x2 +   x3
+        t01123 + x[2] + x[2], //   x0 + 2·x1 + 3·x2 +   x3
+        t01233 + t23,         //   x0 +   x1 + 2·x2 + 3·x3
+        t01233 + x[0] + x[0], // 3·x0 +   x1 +   x2 + 2·x3
+    ]
 }
 
 pub fn external_linear<A: Algebra>(s: &mut [A; WIDTH]) {
@@ -141,7 +145,7 @@ mod tests {
 
     #[test]
     fn m4_matches_matrix() {
-        let m = [[5u64, 7, 1, 3], [4, 6, 1, 1], [1, 3, 5, 7], [1, 1, 4, 6]];
+        let m = [[2u64, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]];
         let x = [F::from_u64(3), F::from_u64(10), F::from_u64(77), F::from_u64(1234)];
         let y = m4(x);
         for i in 0..4 {
@@ -169,6 +173,35 @@ mod tests {
             acc = acc + mu.inv();
         }
         assert_ne!(acc, F::ZERO);
+    }
+
+    /// Bit-for-bit equality with Plonky3's canonical instance on random
+    /// inputs, plus the all-zero and counting vectors.
+    #[test]
+    fn matches_plonky3() {
+        use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear};
+        use p3_field::{PrimeCharacteristicRing, PrimeField32};
+        use p3_symmetric::Permutation;
+        let p3 = default_babybear_poseidon2_16();
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut inputs: alloc::vec::Vec<[u32; WIDTH]> =
+            alloc::vec![[0; WIDTH], core::array::from_fn(|i| i as u32)];
+        for _ in 0..64 {
+            inputs.push(core::array::from_fn(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed % crate::field::P as u64) as u32
+            }));
+        }
+        for input in inputs {
+            let ours = permute(input.map(|v| F::from_u64(v as u64)));
+            let mut theirs = input.map(BabyBear::from_u32);
+            p3.permute_mut(&mut theirs);
+            for i in 0..WIDTH {
+                assert_eq!(ours[i].value(), theirs[i].as_canonical_u32(), "lane {i} for input {input:?}");
+            }
+        }
     }
 
     #[test]

@@ -67,7 +67,7 @@ without branching on the underlying SNARK.
            │  │ (5)     │ │    │  │anarchy │  │
            │  └─────────┘ │    │  └────────┘  │
            └──────────────┘    └──────────────┘
-              PRODUCTION          PROTOTYPE
+              PRODUCTION          PQ (unaudited)
 ```
 
 ```
@@ -147,7 +147,7 @@ without branching on the underlying SNARK.
   │   ├── sep-tyranny/    + README + tests + test_snapshots/
   │   └── tests/fixtures/          baked VK + canonical proof + PI
   │                                 byte fixtures (committed)
-  ├── pq/                          PQ flavor (prototype): sha-fri/
+  ├── pq/                          PQ flavor (unaudited): sha-fri/
   │                                 ZK STARK verifier + prover,
   │                                 sep-anarchy/ contract; see
   │                                 pq/sha-fri/README.md

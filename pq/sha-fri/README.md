@@ -10,7 +10,7 @@ commitments** (about 8.4K CPU per host call) instead.
 ```
   pq/sha-fri/          no_std verifier + `prover` feature
     air.rs             membership AIR (Poseidon2-BabyBear-16, one row per round)
-    poseidon2*.rs      permutation, generic over F / E; prototype constants
+    poseidon2*.rs      Plonky3's canonical BabyBear-16 instance, generic over F / E
     verifier.rs        AIR check at z, DEEP, FRI
     prover.rs          ZK prover (masking, randomizers, salted leaves)
   pq/sha-fri-bench/    Soroban contract: verify(params, proof, pi) -> bool
@@ -104,14 +104,24 @@ Takeaways:
 - Rejecting a wrong epoch costs about 18.5M CPU: the AIR check at `z` and
   setup run before any query work.
 
-## Not covered (needed before production)
+## Primitives
 
-- **Poseidon2 constants are not canonical.** Swap in Plonky3's
-  BabyBear-16 set (round constants and internal diagonal) and add KATs.
-- **The bench prover's randomness is seeded xorshift.** Production must
-  use a CSPRNG, or the proof is not zero-knowledge.
-- Security figures are heuristics. A real parameter choice needs a
-  soundness calculator (FRI + DEEP-ALI + grinding).
-- Measured with testutils metering (same cost model as the network), not
-  on a live network.
-- No audit.
+- **Poseidon2**: Plonky3's canonical BabyBear-16 instance (`p3-baby-bear`
+  0.8.0: Grain-LFSR round constants, `MDSMat4`, internal diagonal `V`).
+  `poseidon2::tests::matches_plonky3` checks our permutation against
+  `p3_baby_bear::default_babybear_poseidon2_16()` bit for bit (dev-only
+  dependency; nothing from Plonky3 ships on-chain).
+- **Prover randomness**: `prover::prove` seeds ChaCha20 from OS entropy
+  for every trace mask, quotient randomizer, FRI mask coefficient and
+  leaf salt; field elements are rejection-sampled, so they are exactly
+  uniform. `prove_seeded` exists for reproducible tests only.
+
+## Open items
+
+- **Audit.** Nothing here has been externally reviewed.
+- **Soundness analysis.** The security figures are standard estimates
+  (conjectured FRI soundness, halved for quantum adversaries, capped by
+  the challenge field), not a formal proof for this construction.
+- **Client-side secrets.** Clients must derive `sk` and salts from their
+  own key material; `prover::random_witness` is a test/bench helper.
+  The prover doesn't zeroize witness memory.

@@ -19,12 +19,12 @@ struct Bundle {
 fn bundle(seed: u64) -> Bundle {
     let member = prover::random_witness(5, seed, 0);
     let pm = deployment_params(Kind::Membership, 5, PROFILE);
-    let create_proof = prover::prove(&Sha2Hasher, &pm, &member, seed + 1);
+    let create_proof = prover::prove(&Sha2Hasher, &pm, &member);
     let commitment = digest_to_bytes(&member.public_inputs().commitment);
 
     let upd = prover::with_random_update(prover::random_witness(5, seed, 0), seed);
     let pu = deployment_params(Kind::Update, 5, PROFILE);
-    let update_proof = prover::prove(&Sha2Hasher, &pu, &upd, seed + 2);
+    let update_proof = prover::prove(&Sha2Hasher, &pu, &upd);
     let c_new = digest_to_bytes(&upd.public_inputs().c_new.unwrap());
     Bundle { commitment, c_new, create_proof, update_proof }
 }

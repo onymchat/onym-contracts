@@ -19,10 +19,21 @@ std = []
 # Degree-8 challenge extension (~248 bits) for post-quantum parameter
 # sets; see field.rs.
 ext8 = []
-prover = ["std", "dep:sha2"]
+prover = ["std", "dep:sha2", "dep:rand_chacha", "dep:rand_core"]
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false, optional = true }
+# Prover randomness (ZK masks, randomizers, leaf salts): ChaCha20 seeded
+# from OS entropy.
+rand_chacha = { version = "0.9", default-features = false, features = ["std", "os_rng"], optional = true }
+rand_core = { version = "0.9", default-features = false, optional = true }
+
+# Test-only: the reference Poseidon2 instance our permutation must match
+# bit for bit (poseidon2::tests::matches_plonky3).
+[dev-dependencies]
+p3-baby-bear = "=0.8.0"
+p3-field = "=0.8.0"
+p3-symmetric = "=0.8.0"
 
 [profile.release]
 opt-level = 3

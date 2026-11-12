@@ -8,9 +8,15 @@
 //! - 16-byte random salt in every trace / quotient Merkle leaf, so
 //!   unopened leaf hashes don't commit to guessable values.
 //!
-//! **Bench randomness**: masks and salts come from a seeded xorshift so
-//! runs are reproducible. A production prover must draw them from a
-//! CSPRNG; with a predictable seed the proof is not zero-knowledge.
+//! **Randomness.** Every mask, randomizer and salt comes from ChaCha20.
+//! [`prove`] seeds it from OS entropy (`getrandom`); this is what clients
+//! must use, since zero-knowledge holds only if these values are secret
+//! and unpredictable. [`prove_seeded`] takes an explicit 32-byte seed for
+//! reproducible tests; a seed anyone can guess voids the hiding.
+//! Field elements are drawn by rejection sampling (31-bit candidates
+//! below `p`), so they are exactly uniform: `u64 mod p` would leave a
+//! ~2⁻³³ bias per element, which accumulates over the thousands of
+//! masking values the statistical-ZK argument relies on.
 //!
 //! Self-checks (panics on failure, so a passing prove is itself an
 //! end-to-end consistency test): the quotient numerator divides exactly
@@ -65,28 +71,51 @@ impl Tree {
     }
 }
 
-struct Rng(u64);
+/// ChaCha20 CSPRNG with exactly-uniform field sampling.
+pub struct Rng(rand_chacha::ChaCha20Rng);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
-        // xorshift64*: reproducible bench data, NOT a CSPRNG.
-        self.0 ^= self.0 >> 12;
-        self.0 ^= self.0 << 25;
-        self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    /// Seeded from OS entropy. Panics if the OS RNG is unavailable:
+    /// proving without secret randomness would silently drop ZK.
+    pub fn from_os() -> Rng {
+        use rand_core::SeedableRng;
+        Rng(rand_chacha::ChaCha20Rng::try_from_os_rng().expect("OS RNG unavailable"))
     }
+
+    /// Deterministic: for tests and reproducible benches only.
+    pub fn from_seed(seed: [u8; 32]) -> Rng {
+        use rand_core::SeedableRng;
+        Rng(rand_chacha::ChaCha20Rng::from_seed(seed))
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        rand_core::RngCore::next_u32(&mut self.0)
+    }
+
+    /// Uniform in `[0, p)` by rejection on 31-bit candidates (accept rate
+    /// `p / 2³¹ ≈ 0.94`).
     fn f(&mut self) -> F {
-        F::from_u64(self.next())
+        loop {
+            if let Some(v) = F::from_canonical(self.next_u32() & 0x7fff_ffff) {
+                return v;
+            }
+        }
     }
     fn e(&mut self) -> E {
         E(core::array::from_fn(|_| self.f()))
     }
     fn salt(&mut self) -> [u8; LEAF_SALT] {
         let mut s = [0u8; LEAF_SALT];
-        s[..8].copy_from_slice(&self.next().to_le_bytes());
-        s[8..].copy_from_slice(&self.next().to_le_bytes());
+        rand_core::RngCore::fill_bytes(&mut self.0, &mut s);
         s
     }
+}
+
+/// Expand a `u64` into a 32-byte seed (tests / benches only).
+pub fn seed_from_u64(x: u64) -> [u8; 32] {
+    let mut s = [0u8; 32];
+    s[..8].copy_from_slice(&x.to_le_bytes());
+    s
 }
 
 /// Merkle leaves for column-major LDE data grouped by layer-0 cosets:
@@ -132,8 +161,16 @@ fn coset_leaf_bytes(cw: &[E], idx: usize, leaves: usize, arity: usize) -> Vec<u8
     (0..arity).flat_map(|t| cw[idx + t * leaves].to_bytes()).collect()
 }
 
-pub fn prove<H: Hasher>(h: &H, p: &Params, w: &Witness, seed: u64) -> Vec<u8> {
-    prove_trace(h, p, &w.public_inputs(), w.trace(&p.shape()), seed)
+/// Proves `w` with masking randomness from OS entropy. Use this for real
+/// proofs.
+pub fn prove<H: Hasher>(h: &H, p: &Params, w: &Witness) -> Vec<u8> {
+    prove_trace(h, p, &w.public_inputs(), w.trace(&p.shape()), Rng::from_os())
+}
+
+/// Deterministic variant for reproducible tests. Never use a guessable
+/// seed for a real proof: it would void zero-knowledge.
+pub fn prove_seeded<H: Hasher>(h: &H, p: &Params, w: &Witness, seed: [u8; 32]) -> Vec<u8> {
+    prove_trace(h, p, &w.public_inputs(), w.trace(&p.shape()), Rng::from_seed(seed))
 }
 
 /// Proves an explicit trace against explicit public inputs. Panics if the
@@ -143,7 +180,7 @@ fn prove_trace<H: Hasher>(
     p: &Params,
     pi: &air::PublicInputs,
     rows: Vec<[F; MAX_COLS]>,
-    seed: u64,
+    mut rng: Rng,
 ) -> Vec<u8> {
     p.validate().expect("invalid params");
     let shape: Shape = p.shape();
@@ -157,7 +194,6 @@ fn prove_trace<H: Hasher>(
     let params_bytes = p.to_bytes();
     assert_eq!(p.kind, shape.kind);
     let pi_bytes = pi.to_bytes();
-    let mut rng = Rng(seed | 1);
     let g = F::two_adic_generator(p.log_n());
 
     // ---- Trace: interpolate, mask with Z_H·R, LDE on the coset -------
@@ -343,10 +379,12 @@ fn prove_trace<H: Hasher>(
 }
 
 /// Random membership witness for benches and tests: random key, path,
-/// salt; `epoch` as given.
+/// salt; `epoch` as given. Deterministic in `seed` so a bench can rebuild
+/// the same member for create and update. Real clients derive keys and
+/// salts from their own secret material, not from this helper.
 pub fn random_witness(depth: usize, seed: u64, epoch: u64) -> Witness {
-    let mut rng = Rng(seed | 1);
-    let mut digest = || -> [F; 8] { core::array::from_fn(|_| F::from_u64(rng.next())) };
+    let mut rng = Rng::from_seed(seed_from_u64(seed));
+    let mut digest = || -> [F; 8] { core::array::from_fn(|_| rng.f()) };
     let sk = digest();
     let salt = digest();
     let path = (0..depth).map(|_| digest()).collect();
@@ -362,8 +400,8 @@ pub fn with_admin(mut w: Witness, group_id: [F; 8]) -> Witness {
 
 /// The same member's update from `w`'s state to a random new root/salt.
 pub fn with_random_update(mut w: Witness, seed: u64) -> Witness {
-    let mut rng = Rng(seed.rotate_left(17) | 1);
-    let mut digest = || -> [F; 8] { core::array::from_fn(|_| F::from_u64(rng.next())) };
+    let mut rng = Rng::from_seed(seed_from_u64(seed.rotate_left(17) ^ 0x5eed));
+    let mut digest = || -> [F; 8] { core::array::from_fn(|_| rng.f()) };
     w.update = Some(air::UpdateWitness { root_new: digest(), salt_new: digest() });
     w
 }
@@ -400,26 +438,6 @@ mod tests {
     }
 
     const KINDS: [Kind; 4] = [Kind::Membership, Kind::Update, Kind::AdminCreate, Kind::AdminUpdate];
-
-    #[test]
-    fn constants_match_derivation() {
-        use sha2::{Digest as _, Sha256};
-        let derive = |i: u32| {
-            let mut h = Sha256::new();
-            h.update(b"onym-poseidon2-babybear-w16-v0");
-            h.update(i.to_le_bytes());
-            let d = h.finalize();
-            (u64::from_le_bytes(d[..8].try_into().unwrap()) % crate::field::P as u64) as u32
-        };
-        for r in 0..8 {
-            for l in 0..16 {
-                assert_eq!(crate::poseidon2_constants::RC_EXT[r][l], derive((16 * r + l) as u32));
-            }
-        }
-        for r in 0..13 {
-            assert_eq!(crate::poseidon2_constants::RC_INT[r], derive(128 + r as u32));
-        }
-    }
 
     #[test]
     fn trace_satisfies_air_on_trace_domain() {
@@ -467,7 +485,7 @@ mod tests {
                 let h = 12 * (1u16 << arities[0]) + 2;
                 let p = Params { mask_degree: h, log_arities: arities, ..small(kind) };
                 let w = witness(kind);
-                let proof = prove(&Sha2Hasher, &p, &w, 99);
+                let proof = prove_seeded(&Sha2Hasher, &p, &w, seed_from_u64(99));
                 let pi = w.public_inputs().to_bytes();
                 assert_eq!(verify(&Sha2Hasher, &p.to_bytes(), &proof, &pi), Ok(()), "{kind:?} {:?}", p.log_arities);
             }
@@ -501,7 +519,7 @@ mod tests {
         for kind in KINDS {
             let p = small(kind);
             let w = witness(kind);
-            let proof = prove(&Sha2Hasher, &p, &w, 99);
+            let proof = prove_seeded(&Sha2Hasher, &p, &w, seed_from_u64(99));
             let pi = w.public_inputs();
             let pb = p.to_bytes();
             let wrong_epoch = PublicInputs { epoch: pi.epoch + 1, ..w.public_inputs() };
@@ -532,7 +550,7 @@ mod tests {
     #[test]
     fn rejects_proof_of_the_other_kind() {
         let w = witness(Kind::Update);
-        let proof = prove(&Sha2Hasher, &small(Kind::Update), &w, 99);
+        let proof = prove_seeded(&Sha2Hasher, &small(Kind::Update), &w, seed_from_u64(99));
         let mut pi = w.public_inputs();
         pi.c_new = None;
         assert!(verify(&Sha2Hasher, &small(Kind::Membership).to_bytes(), &proof, &pi.to_bytes()).is_err());
@@ -543,7 +561,7 @@ mod tests {
         for kind in KINDS {
             let p = small(kind);
             let w = witness(kind);
-            let proof = prove(&Sha2Hasher, &p, &w, 99);
+            let proof = prove_seeded(&Sha2Hasher, &p, &w, seed_from_u64(99));
             let pb = p.to_bytes();
             let pi = w.public_inputs().to_bytes();
             for i in (0..proof.len()).step_by(41) {
@@ -558,7 +576,7 @@ mod tests {
     fn rejects_truncated_and_extended() {
         let p = small(Kind::Membership);
         let w = witness(Kind::Membership);
-        let proof = prove(&Sha2Hasher, &p, &w, 99);
+        let proof = prove_seeded(&Sha2Hasher, &p, &w, seed_from_u64(99));
         let pb = p.to_bytes();
         let pi = w.public_inputs().to_bytes();
         assert_eq!(verify(&Sha2Hasher, &pb, &proof[..proof.len() - 1], &pi), Err(VerifyError::BadProof));
@@ -576,7 +594,7 @@ mod tests {
         let mut w = witness(Kind::Membership);
         let real = w.public_inputs();
         w.sk[0] = w.sk[0] + F::ONE;
-        prove_trace(&Sha2Hasher, &p, &real, w.trace(&p.shape()), 1);
+        prove_trace(&Sha2Hasher, &p, &real, w.trace(&p.shape()), Rng::from_seed([1; 32]));
     }
 
     #[test]
@@ -586,7 +604,7 @@ mod tests {
         let mut w = witness(Kind::Update);
         let real = w.public_inputs();
         w.sk[0] = w.sk[0] + F::ONE;
-        prove_trace(&Sha2Hasher, &p, &real, w.trace(&p.shape()), 1);
+        prove_trace(&Sha2Hasher, &p, &real, w.trace(&p.shape()), Rng::from_seed([1; 32]));
     }
 
     #[test]
@@ -599,7 +617,7 @@ mod tests {
         let real = admin.public_inputs();
         let mut other = witness(Kind::AdminCreate);
         other.sk[2] = other.sk[2] + F::ONE;
-        prove_trace(&Sha2Hasher, &p, &real, other.trace(&p.shape()), 1);
+        prove_trace(&Sha2Hasher, &p, &real, other.trace(&p.shape()), Rng::from_seed([1; 32]));
     }
 
     #[test]
@@ -612,10 +630,35 @@ mod tests {
     }
 
     #[test]
+    fn os_seeded_proofs_differ_but_both_verify() {
+        // Fresh OS randomness per proof: same witness, different bytes.
+        let p = small(Kind::Membership);
+        let w = witness(Kind::Membership);
+        let (a, b) = (prove(&Sha2Hasher, &p, &w), prove(&Sha2Hasher, &p, &w));
+        assert_ne!(a, b);
+        let pi = w.public_inputs().to_bytes();
+        assert_eq!(verify(&Sha2Hasher, &p.to_bytes(), &a, &pi), Ok(()));
+        assert_eq!(verify(&Sha2Hasher, &p.to_bytes(), &b, &pi), Ok(()));
+    }
+
+    #[test]
+    fn field_sampling_is_canonical_and_spread() {
+        let mut rng = Rng::from_seed([7; 32]);
+        let xs: Vec<u32> = (0..20_000).map(|_| rng.f().value()).collect();
+        assert!(xs.iter().all(|&x| x < crate::field::P));
+        // Rough uniformity: each eighth of [0, p) gets 12.5% ± 1%.
+        let eighth = crate::field::P / 8;
+        for k in 0..8 {
+            let c = xs.iter().filter(|&&x| x / eighth == k).count();
+            assert!((2300..2700).contains(&c), "bucket {k}: {c}");
+        }
+    }
+
+    #[test]
     fn rejects_proof_for_different_params() {
         let p = small(Kind::Membership);
         let w = witness(Kind::Membership);
-        let proof = prove(&Sha2Hasher, &p, &w, 99);
+        let proof = prove_seeded(&Sha2Hasher, &p, &w, seed_from_u64(99));
         let other = Params { num_queries: 13, mask_degree: 28, ..small(Kind::Membership) };
         let pi = w.public_inputs().to_bytes();
         assert!(verify(&Sha2Hasher, &other.to_bytes(), &proof, &pi).is_err());

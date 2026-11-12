@@ -20,8 +20,8 @@
 //!
 //! ## Status
 //!
-//! Prototype. Poseidon2 round constants are not Plonky3's canonical set
-//! and the code is unaudited; see `pq/sha-fri/README.md`.
+//! Poseidon2 is Plonky3's canonical BabyBear-16 instance. Unaudited; see
+//! `pq/sha-fri/README.md` for open items.
 
 #![no_std]
 
