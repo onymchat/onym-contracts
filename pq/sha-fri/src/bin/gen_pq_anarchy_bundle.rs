@@ -77,7 +77,7 @@ fn main() -> ExitCode {
     // ---- create: membership at epoch 0 ------------------------------
     let member = prover::random_witness(depth as usize, seed, 0);
     let p = deployment_params(Kind::Membership, depth, profile);
-    let create_proof = prover::prove(&Sha2Hasher, &p, &member, seed ^ 0xC0FFEE);
+    let create_proof = prover::prove(&Sha2Hasher, &p, &member);
     let pi = member.public_inputs();
     verifier::verify(&Sha2Hasher, &p.to_bytes(), &create_proof, &pi.to_bytes()).expect("create self-verify");
     let commitment = digest_to_bytes(&pi.commitment);
@@ -85,7 +85,7 @@ fn main() -> ExitCode {
     // ---- update: same member, epoch 0 → 1 ---------------------------
     let upd = prover::with_random_update(prover::random_witness(depth as usize, seed, 0), seed);
     let pu = deployment_params(Kind::Update, depth, profile);
-    let update_proof = prover::prove(&Sha2Hasher, &pu, &upd, seed ^ 0xBEEF);
+    let update_proof = prover::prove(&Sha2Hasher, &pu, &upd);
     let upi = upd.public_inputs();
     verifier::verify(&Sha2Hasher, &pu.to_bytes(), &update_proof, &upi.to_bytes()).expect("update self-verify");
     assert_eq!(digest_to_bytes(&upi.commitment), commitment, "update does not chain from create");

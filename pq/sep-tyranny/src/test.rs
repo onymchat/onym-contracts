@@ -29,16 +29,16 @@ fn bundle(seed: u64, group: u64) -> Bundle {
     let g = gid(group);
     let admin = prover::with_admin(prover::random_witness(5, seed, 0), g);
     let pc = deployment_params(Kind::AdminCreate, 5, PROFILE);
-    let create_proof = prover::prove(&Sha2Hasher, &pc, &admin, seed + 1);
+    let create_proof = prover::prove(&Sha2Hasher, &pc, &admin);
     let pi = admin.public_inputs();
 
     let member = prover::random_witness(5, seed, 0);
     let pm = deployment_params(Kind::Membership, 5, PROFILE);
-    let member_proof = prover::prove(&Sha2Hasher, &pm, &member, seed + 2);
+    let member_proof = prover::prove(&Sha2Hasher, &pm, &member);
 
     let upd = prover::with_admin(prover::with_random_update(prover::random_witness(5, seed, 0), seed), g);
     let pu = deployment_params(Kind::AdminUpdate, 5, PROFILE);
-    let update_proof = prover::prove(&Sha2Hasher, &pu, &upd, seed + 3);
+    let update_proof = prover::prove(&Sha2Hasher, &pu, &upd);
     let upi = upd.public_inputs();
 
     Bundle {

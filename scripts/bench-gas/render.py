@@ -279,8 +279,9 @@ def notes_for_flavor(flavor: str) -> list[str]:
             "challenge field, blowup 64, 30 queries, 20 grinding bits; quantum "
             "attacks halve Fiat–Shamir and grinding bits). ~84-101 KB proofs. The "
             "anarchy profiles above are ~100-bit classical, ~50-bit post-quantum.",
-            "- Prototype: Poseidon2 constants are not Plonky3's canonical set and "
-            "the verifier is unaudited (see `pq/sha-fri/README.md`).",
+            "- Poseidon2 is Plonky3's canonical BabyBear-16 instance; prover "
+            "randomness is OS-seeded ChaCha20. Unaudited (see "
+            "`pq/sha-fri/README.md`).",
             "- `set_restricted_mode` second toggle is cheaper than the first "
             "because the storage slot already exists by then (the second write "
             "skips creation overhead).",

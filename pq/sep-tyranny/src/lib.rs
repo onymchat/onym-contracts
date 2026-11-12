@@ -26,7 +26,8 @@
 //! digests: 8 BabyBear limbs, each a canonical little-endian `u32`.
 //! Epochs stay 32-byte big-endian `u64`, as in the PLONK flavor.
 //!
-//! Prototype: non-canonical Poseidon2 constants, unaudited.
+//! Poseidon2 is Plonky3's canonical BabyBear-16 instance. Unaudited; see
+//! `pq/sha-fri/README.md` for open items.
 
 #![no_std]
 

@@ -101,7 +101,7 @@ fn main() {
         let pi = w.public_inputs().to_bytes();
 
         let t0 = Instant::now();
-        let proof = prover::prove(&Sha2Hasher, p, &w, 0xC0FFEE + i as u64);
+        let proof = prover::prove(&Sha2Hasher, p, &w);
         let prove_ms = t0.elapsed().as_millis();
 
         verifier::verify(&Sha2Hasher, &pb, &proof, &pi).expect("native verify");

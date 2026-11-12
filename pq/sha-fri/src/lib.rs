@@ -1,4 +1,4 @@
-//! Prototype post-quantum FRI verifier for Soroban.
+//! Post-quantum zero-knowledge STARK verifier (and prover) for Soroban.
 //!
 //! ## Why this crate exists
 //!
@@ -26,14 +26,20 @@
 //!   randomizers, a random FRI mask polynomial and salted leaves (see
 //!   [`prover`]).
 //!
-//! ## Prototype limits
+//! ## Primitives
 //!
-//! - Poseidon2 constants are nothing-up-my-sleeve, not Plonky3's
-//!   canonical set (see [`poseidon2_constants`]).
-//! - The bench prover's randomness is a seeded xorshift; a real prover
-//!   needs a CSPRNG for the proof to be zero-knowledge.
-//! - Security figures are heuristics, not a soundness calculator.
-//! - No external audit. Verified on-chain by `pq/sep-anarchy`.
+//! - Poseidon2 is Plonky3's canonical BabyBear-16 instance, checked bit
+//!   for bit against `p3-baby-bear` (`poseidon2::tests::matches_plonky3`).
+//! - Prover randomness is ChaCha20 seeded from OS entropy, with
+//!   exactly-uniform field sampling (see [`prover`]).
+//!
+//! ## Open items
+//!
+//! - Security figures come from `Params::{conjectured,johnson,pq}_security_bits`,
+//!   which are standard estimates, not a formal soundness proof for this
+//!   exact construction.
+//! - No external audit. Verified on-chain by `pq/sep-anarchy` and
+//!   `pq/sep-tyranny`.
 
 #![no_std]
 
